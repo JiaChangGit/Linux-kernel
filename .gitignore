@@ -315,3 +315,49 @@ pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/c,cmake,linux,c++,python,visualstudiocode,git
 
+
+
+####### qemu-project
+# ════════════════════════════════════════════════
+#  qemu-platform-demo — .gitignore
+#  對應 06_clean.sh 的清理範圍，確保產物不入 repo
+# ════════════════════════════════════════════════
+
+# ── Kernel source & tarball ──────────────────────
+linux-*/
+qemu-platform-demo/linux-*/
+qemu-platform-demo/*.tar.xz
+qemu-platform-demo/*.tar.gz
+qemu-platform-demo/*.tar.bz2
+
+# ── Kernel / module build artifacts ─────────────
+*.o
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+.*.cmd
+.tmp_versions/
+Module.symvers
+modules.order
+qemu-platform-demo/driver/build/
+
+# ── DTB artifacts ────────────────────────────────
+qemu-platform-demo/dts/*.dtb
+qemu-platform-demo/dts/*.dtbo
+
+# ── rootfs build artifacts ───────────────────────
+qemu-platform-demo/rootfs/initramfs/
+qemu-platform-demo/rootfs/initramfs.cpio.gz
+qemu-platform-demo/rootfs/overlay/myled_ctrl.ko
+
+# ── BusyBox source & build ───────────────────────
+qemu-platform-demo/busybox-*/
+qemu-platform-demo/tools/busybox-aarch64
+
+# ── Misc ─────────────────────────────────────────
+*.log
+*.tmp
+.build_cache/
+__pycache__/
+.DS_Store

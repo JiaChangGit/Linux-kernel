@@ -1,0 +1,27 @@
+#!/bin/sh
+# Minimal /init for QEMU initramfs demo
+
+mount -t proc     none /proc
+mount -t sysfs    none /sys
+mount -t devtmpfs none /dev 2>/dev/null || mdev -s
+
+echo ""
+echo "╔══════════════════════════════════════════════════╗"
+echo "║  Platform Driver + Device Tree  — QEMU Demo     ║"
+echo "╚══════════════════════════════════════════════════╝"
+echo ""
+
+# ── Load our platform driver ────────────────────────────
+echo "[init] Loading myled_ctrl.ko ..."
+insmod /myled_ctrl.ko && echo "[init] Module loaded OK" \
+                      || echo "[init] Module load FAILED"
+
+echo ""
+dmesg | grep -i myled | sed 's/^/  [dmesg] /'
+echo ""
+
+# ── Run interactive demo ────────────────────────────────
+echo "[init] Running demo script ..."
+sh /test_myled.sh
+
+exec sh   # drop to shell for interactive exploration

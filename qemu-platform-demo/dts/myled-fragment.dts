@@ -1,0 +1,36 @@
+/*
+ * myled-fragment.dts
+ *
+ * Fragment to be merged into the QEMU ARM64 virt machine DTB.
+ * The node registers a virtual LED controller at MMIO 0x10010000.
+ *
+ * Properties demonstrated:
+ *   - compatible  : triggers OF match in the driver
+ *   - reg         : MMIO base + size (parsed by platform_get_resource)
+ *   - num-leds    : custom u32 property (of_property_read_u32)
+ *   - label       : custom string property (of_property_read_string)
+ *   - default-brightness : optional init value
+ *   - status      : "okay" to activate the node
+ */
+
+/dts-v1/;
+
+/* This fragment is merged with the QEMU-generated DTB via fdtoverlay */
+/plugin/;
+
+/ {
+    fragment@0 {
+        target-path = "/";
+
+        __overlay__ {
+            myled: myled-controller@10010000 {
+                compatible        = "myvendor,myled-v1";
+                reg               = <0x0 0x10010000 0x0 0x1000>;
+                num-leds          = <4>;
+                label             = "demo-rgb-led";
+                default-brightness = <180>;
+                status            = "okay";
+            };
+        };
+    };
+};
