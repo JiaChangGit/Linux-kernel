@@ -14,6 +14,7 @@ mkdir -p "${ROOTFS_DIR}"/{bin,sbin,etc,proc,sys,dev,lib,lib64,usr/bin}
 #BUSYBOX=$(which busybox-aarch64 2>/dev/null \
 #          || ls /usr/bin/busybox* 2>/dev/null | head -1 \
 #          || echo busybox)
+## !!! Change to your path
 BUSYBOX=~/桌面/Linux-kernel/qemu-platform-demo/busybox-1.36.1/busybox
 
 cp "${BUSYBOX}" "${ROOTFS_DIR}/bin/busybox"

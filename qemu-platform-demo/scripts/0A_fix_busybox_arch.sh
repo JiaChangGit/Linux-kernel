@@ -133,40 +133,9 @@ chmod +x "${OUTPUT}"
 success "BusyBox ARM64 binary → ${OUTPUT}"
 
 # ════════════════════════════════════════════════════════════════════
-info "=== Step 9: 更新 04_build_rootfs.sh 的 BUSYBOX 路徑 ==="
-# ════════════════════════════════════════════════════════════════════
-ROOTFS_SCRIPT="${PROJECT_ROOT}/scripts/04_build_rootfs.sh"
-
-# 把原本的 BUSYBOX= 那幾行換成固定指向 tools/busybox-aarch64
-OLD='BUSYBOX=\$(which busybox-aarch64.*\n.*\n.*busybox\)'
-NEW="BUSYBOX=\"\${PROJECT_ROOT}/tools/busybox-aarch64\""
-
-# 用 Python 做多行取代（bash sed 處理多行很麻煩）
-python3 - <<'PYEOF'
-import re, sys
-
-path = "scripts/04_build_rootfs.sh"
-text = open(path).read()
-
-# 找到 BUSYBOX= 那整個區塊換掉
-pattern = r'BUSYBOX=\$\(which busybox-aarch64.*?echo busybox\)\)'
-replacement = 'BUSYBOX="${PROJECT_ROOT}/tools/busybox-aarch64"'
-
-new_text, count = re.subn(pattern, replacement, text, flags=re.DOTALL)
-if count == 0:
-    # 可能已經改過了，或格式不同，直接確認就好
-    print("[WARN] 04_build_rootfs.sh 的 BUSYBOX 行未匹配，請手動確認")
-else:
-    open(path, 'w').write(new_text)
-    print("[OK]   04_build_rootfs.sh BUSYBOX 路徑已更新")
-PYEOF
-
-# ── 同時確保 04_build_rootfs.sh 有 PROJECT_ROOT 變數 ──────────────
-if ! grep -q "PROJECT_ROOT" "${ROOTFS_SCRIPT}"; then
-    sed -i '2i PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"' \
-        "${ROOTFS_SCRIPT}"
-    info "已在 04_build_rootfs.sh 加入 PROJECT_ROOT 定義"
-fi
+info "=== Step 9: 請自行更新 04_build_rootfs.sh 的 BUSYBOX 路徑 ==="
+echo -e "例如:"
+echo -e "BUSYBOX=~/桌面/Linux-kernel/qemu-platform-demo/busybox-1.36.1/busybox"
 
 # ════════════════════════════════════════════════════════════════════
 echo ""
