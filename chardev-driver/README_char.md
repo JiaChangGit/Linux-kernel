@@ -185,6 +185,8 @@ Expected output:
 ```bash
 cd ..
 bash scripts/unload.sh
+cd userspace
+make clean
 ```
 
 ---
@@ -418,6 +420,8 @@ sudo dmesg | grep chardev
 ```bash
 cd ..
 bash scripts/unload.sh
+cd userspace
+make clean
 ```
 
 ---
