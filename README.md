@@ -32,10 +32,6 @@ These projects are intended to show hands-on experience with:
 | `chardev-driver` | Linux kernel module development | character device registration, userspace-kernel interface design, `procfs`, `sysfs`, `ioctl` | [chardev-driver/README_char.md](chardev-driver/README_char.md) |
 | `qemu-platform-demo` | Embedded Linux / ARM64 | kernel build flow, DTB patching, out-of-tree driver integration, initramfs, QEMU boot and verification | [qemu-platform-demo/README_qemu.md](qemu-platform-demo/README_qemu.md) |
 
-## Why These Projects Matter
-
-This collection is structured to reflect a practical engineering path rather than isolated demos.
-
 - `fwsh` shows command parsing, process creation, file descriptor handling, and interactive shell behavior.
 - `chardev-driver` moves into kernel-space development and exposes a driver through multiple Linux interfaces.
 - `qemu-platform-demo` extends the work into a fuller embedded workflow, including toolchain setup, kernel build, driver deployment, and virtual platform validation.
@@ -132,10 +128,6 @@ Linux-kernel/
 | `fwsh` | 使用者空間系統程式 | `fork/exec`、pipeline、redirect、built-in commands、signal handling、記憶體管理 | [fwsh/README_fwsh.md](fwsh/README_fwsh.md) |
 | `chardev-driver` | Linux kernel module 開發 | character device 註冊、user-kernel 介面設計、`procfs`、`sysfs`、`ioctl` | [chardev-driver/README_char.md](chardev-driver/README_char.md) |
 | `qemu-platform-demo` | Embedded Linux / ARM64 | kernel 編譯流程、DTB patch、out-of-tree driver 整合、initramfs、QEMU 開機與驗證 | [qemu-platform-demo/README_qemu.md](qemu-platform-demo/README_qemu.md) |
-
-## 這組專案的價值
-
-這不是單純把 3 個 demo 放在一起，而是刻意排成一條比較接近實務能力成長的路線。
 
 - `fwsh` 展示指令解析、行程建立、file descriptor 控制，以及互動式 shell 行為。
 - `chardev-driver` 進一步進入 kernel-space，透過多種 Linux 介面把驅動功能暴露給 userspace。
