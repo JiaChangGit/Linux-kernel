@@ -324,7 +324,6 @@ pyrightconfig.json
 # ════════════════════════════════════════════════
 
 # ── Kernel source & tarball ──────────────────────
-linux-*/
 qemu-platform-demo/linux-*/
 qemu-platform-demo/*.tar.xz
 qemu-platform-demo/*.tar.gz
