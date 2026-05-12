@@ -1,155 +1,183 @@
-# Linux Kernel Portfolio Projects 技術報告
+# Linux Kernel / Embedded Systems Portfolio 技術總報告
 
-## 摘要
+## 1. 報告定位
 
-本專案是一組 Linux 系統軟體作品集，專案由三個子專案組成：
+這份 `report.md` 以目前最上層目錄的**實際專案內容**為準，不只看舊版 `README.md`。  
+依照目前 repository 狀態，這裡共有六個主要主題專案：
 
-- `fwsh`：以 C 與 POSIX API 實作的迷你 Shell，展示命令解析、行程建立、Pipeline、I/O Redirection、Signal Handling 與韌體工程常用小工具。
-- `chardev-driver`：Linux Character Device Driver，展示 `cdev`、`file_operations`、`copy_to_user()` / `copy_from_user()`、`ioctl`、`procfs`、`sysfs` 與 Kernel Module 生命週期。
-- `qemu-platform-demo`：ARM64 QEMU 平台驅動示範，展示 Linux kernel cross-compilation、Device Tree overlay、Platform Driver、MMIO register model、initramfs 與 QEMU boot flow。
+1. `fwsh`
+2. `chardev-driver`
+3. `qemu-platform-demo`
+4. `isr_dma_demo`
+5. `cpu-scheduling-qemu`
+6. `linux-ipc-benchmark`
 
-這三個專案合在一起，可以說明一個工程師如何從應用程式層理解 Process / File Descriptor，再往下延伸到 Linux Kernel Driver 的 VFS 介面，最後進入嵌入式 Linux 常見的 Device Tree 與 Platform Driver 工作流程。
+如果要用一句話總結這個 repository：
 
-## 專案技術地圖
+> 這是一組從 user space、kernel module、IPC、platform driver、QEMU 驗證，到 trace / observability 設計都涵蓋到的 Linux 系統軟體作品集。
 
-| 子專案 | 技術領域 | 主要技術 | 重點能力 |
+本報告的目標有三個：
+
+1. 快速說清楚每個子專案在做什麼。
+2. 深入拆解關鍵技術與其工程意義。
+3. 特別把 `Trace` / `Tracing` / `Observability` 如何被實作出來講清楚，而且用字精確，不把一般 log 混稱成完整 tracing framework。
+
+---
+
+## 2. 先看懂全貌
+
+### 2.1 專案總覽
+
+| 專案 | 層次 | 主題 | 最重要的技術 |
 |---|---|---|---|
-| `fwsh` | User-space system programming | C、POSIX、GNU Readline、`fork()`、`execvp()`、`pipe()`、`dup2()`、`waitpid()`、Signal | Shell REPL、命令解析、Pipeline 執行、背景行程、韌體工具 |
-| `chardev-driver` | Linux kernel module / Character device | `alloc_chrdev_region()`、`cdev_add()`、`struct file_operations`、`ioctl`、`procfs`、`sysfs`、Mutex、Atomic | User-kernel interface、裝置檔 `/dev/chardev0`、狀態觀測與控制 |
-| `qemu-platform-demo` | Embedded Linux / ARM64 / Platform driver | QEMU、ARM64 cross compile、Device Tree、DTB overlay、`platform_driver`、`of_match_table`、`devm_ioremap_resource()`、initramfs | 平台裝置描述、probe/remove 生命週期、sysfs 控制介面、虛擬硬體驗證 |
+| `fwsh` | User Space | Shell 與程序控制 | `fork()`、`execvp()`、`pipe()`、`dup2()`、Readline、dispatch table |
+| `chardev-driver` | Kernel Space | Character Device Driver | `cdev`、`file_operations`、`ioctl`、`procfs`、`sysfs`、`mutex` |
+| `qemu-platform-demo` | Embedded Linux / ARM64 | Platform Driver bring-up | Device Tree、`platform_driver`、MMIO、`devm_ioremap_resource()`、initramfs、QEMU |
+| `isr_dma_demo` | Kernel + Userspace Data Path | ISR-like producer + DMA ring buffer | `hrtimer`、`dma_alloc_coherent()`、`mmap()`、ring buffer、`/proc`、memory barrier |
+| `cpu-scheduling-qemu` | Simulator + VM Automation | CPU scheduling 演算法與 execution trace | FCFS / SJF / SRTF / RR、`GanttSlot`、structured benchmark output、QEMU VM |
+| `linux-ipc-benchmark` | Kernel + Userspace IPC | Message Queue vs Shared Memory | `kfifo`、wait queue、`vmalloc()`、`mmap()`、`atomic64_t`、`pthreads` benchmark |
 
-## 關鍵字教學與觀念整理
+### 2.2 這個 repository 真正在展示什麼能力
 
-### User Space（使用者空間）與 Kernel Space（核心空間）
+這不是單一題目，而是一條很清楚的能力鏈：
 
-Linux 將程式執行環境分為 User Space 與 Kernel Space。User Space 是一般應用程式執行的位置，例如 `fwsh` 與 `test_app.c`；Kernel Space 則是 Linux 核心與驅動程式執行的位置，例如 `chardev.c` 與 `myled_ctrl.c`。
+1. `fwsh` 先處理 user space 的 process、pipe、file descriptor、command dispatch。
+2. `chardev-driver` 把 Linux 一切皆檔案（everything is a file）的 VFS 抽象往 kernel space 延伸。
+3. `qemu-platform-demo` 進一步處理 embedded Linux 典型的 Device Tree、platform driver、initramfs、ARM64/QEMU bring-up。
+4. `isr_dma_demo` 把問題提升到高頻資料路徑、ring buffer、共享記憶體與 zero-copy。
+5. `cpu-scheduling-qemu` 則把「狀態轉移、時間推進、可重現 trace」抽象成排程模擬器。
+6. `linux-ipc-benchmark` 用兩種 kernel module 親自對照 IPC 路徑成本，讓「shared memory 比 message queue 快」不只是口號，而是可讀、可測、可驗證的程式路徑差異。
 
-這個隔離非常重要。User Space 程式不能直接任意讀寫 Kernel memory，必須透過系統呼叫（System Call）或驅動介面溝通。例如 `chardev-driver` 中，使用者程式呼叫 `write(fd, buf, len)`，最後會進入驅動的 `.write = chardev_write`。驅動不能直接使用 user pointer，而是要透過 `copy_from_user()` 安全地把資料複製到 kernel buffer。
+---
 
-### VFS（Virtual File System，虛擬檔案系統）
+## 3. 技術地圖
 
-Linux 把許多資源抽象成檔案，裝置也不例外。Character Device Driver 透過 VFS 將 `/dev/chardev0` 暴露給 User Space。使用者執行：
+### 3.1 User Space（使用者空間）
 
-```bash
-echo "Firmware Engineer" > /dev/chardev0
-cat /dev/chardev0
-```
+代表專案：
 
-看起來像在讀寫檔案，實際上 VFS 會把操作分派到驅動註冊的 `struct file_operations`：
+- `fwsh`
+- `cpu-scheduling-qemu/src/scheduler.c`
+- `linux-ipc-benchmark/user/*`
+- `isr_dma_demo/userspace/consumer.c`
 
-```c
-static const struct file_operations chardev_fops = {
-    .owner = THIS_MODULE,
-    .open = chardev_open,
-    .release = chardev_release,
-    .read = chardev_read,
-    .write = chardev_write,
-    .unlocked_ioctl = chardev_ioctl,
-};
-```
+核心主題：
 
-這是 Linux driver 的重要設計：User Space 使用一致的檔案 API，Kernel Driver 實作背後真正的行為。
+- POSIX process control
+- I/O redirection
+- pipeline
+- `pthread` 併發
+- `mmap()` 使用者端共享記憶體存取
+- benchmark 與 structured output
 
-### Device Tree（裝置樹）與 Platform Driver（平台驅動）
+### 3.2 Kernel Space（核心空間）
 
-Device Tree 是一種描述硬體的資料結構，常見於 ARM / ARM64 embedded Linux。它回答一個問題：這台機器有哪些硬體？位址在哪裡？有哪些屬性？驅動程式不應把板子的硬體資訊寫死在 C code 裡，而應從 Device Tree 讀取。
+代表專案：
 
-在 `qemu-platform-demo/dts/myled-fragment.dts` 中，專案新增了一個虛擬 LED controller：
+- `chardev-driver/driver/chardev.c`
+- `isr_dma_demo/kernel/isr_dma_module.c`
+- `linux-ipc-benchmark/kernel/mq_module.c`
+- `linux-ipc-benchmark/kernel/shm_module.c`
 
-```dts
-myled: myled-controller@10010000 {
-    compatible        = "myvendor,myled-v1";
-    reg               = <0x0 0x10010000 0x0 0x1000>;
-    num-leds          = <4>;
-    label             = "demo-rgb-led";
-    default-brightness = <180>;
-    status            = "okay";
-};
-```
+核心主題：
 
-其中 `compatible = "myvendor,myled-v1"` 會對應到 driver 中的 OF match table：
+- `struct file_operations`
+- `copy_to_user()` / `copy_from_user()`
+- `procfs` / `seq_file`
+- `sysfs`
+- `ioctl`
+- `mutex` / `spinlock` / wait queue / `atomic_t`
+- `kfifo`
+- `hrtimer`
+- `dma_alloc_coherent()`
+- memory mapping 與 page remap
 
-```c
-static const struct of_device_id myled_of_match[] = {
-    {.compatible = "myvendor,myled-v1"},
-    {.compatible = "myvendor,myled"},
-    {/* sentinel */}
-};
-```
+### 3.3 Embedded Platform（嵌入式平台）
 
-當 Linux kernel 啟動並解析 DTB 後，若找到 compatible 相符的節點，就會建立 platform device，接著呼叫 platform driver 的 `probe()`。
+代表專案：
 
-### initramfs（Initial RAM Filesystem，初始記憶體檔案系統）
+- `qemu-platform-demo`
 
-`initramfs` 是 kernel 啟動後最早掛載的根檔案系統之一。在本專案中，`qemu-platform-demo/scripts/04_build_rootfs.sh` 建立一個極小 root filesystem，把 BusyBox、`/init`、測試腳本與 `myled_ctrl.ko` 包進 `rootfs/initramfs.cpio.gz`。
+核心主題：
 
-QEMU 啟動時透過：
+- ARM64 cross-compilation
+- Device Tree（裝置樹）
+- DT overlay / DTB patching
+- platform device / platform driver
+- MMIO（Memory-Mapped I/O）
+- BusyBox rootfs
+- initramfs
+- QEMU `virt` machine
 
-```bash
--initrd rootfs/initramfs.cpio.gz
--append "console=ttyAMA0 earlycon=pl011,0x9000000 rdinit=/init loglevel=7"
-```
+### 3.4 Observability / Trace（可觀測性 / 追蹤）
 
-告訴 kernel：請載入這個 initramfs，並且執行 `/init` 作為第一個 user-space 程式。`/init` 會掛載 `/proc`、`/sys`、`/dev`，再 `insmod /myled_ctrl.ko` 載入 platform driver。
+這是目前整個 repository 最值得細看的共通能力。
 
-## 子專案一：fwsh Firmware Mini Shell
+重點不是只會印 `printf()` 或 `pr_info()`，而是會設計多層次的觀測面：
 
-### 設計目標
+- lifecycle trace：系統走到哪一步
+- state trace：系統目前狀態是什麼
+- data trace：資料內容長什麼樣
+- execution trace：執行順序與時間線
+- performance trace：每條資料路徑的成本差異
 
-`fwsh` 是一個以 firmware engineer 需求為中心的迷你 Shell。它不是只執行單一命令，而是實作 Shell 的核心能力：
+---
 
-- REPL（Read-Eval-Print Loop）
-- GNU Readline command editing / history
-- Pipeline：`cmd1 | cmd2 | cmd3`
-- I/O Redirection：`<`、`>`、`>>`
-- Background execution：`&`
-- Signal handling：`SIGCHLD`、`SIGINT`、`SIGTSTP`
-- Built-in commands：`cd`、`pwd`、`history`、`clear`、`help`、`exit`
-- Firmware utilities：`hexdump`、`crc32`、`memmap`
+## 4. 關鍵字中英文對照
 
-### 核心資料結構
+| 中文 | English | 精確說明 |
+|---|---|---|
+| 行程 | Process | OS 管理的執行實體，擁有獨立虛擬位址空間 |
+| 執行緒 | Thread | 同一行程內共享位址空間的執行單位 |
+| 檔案描述符 | File Descriptor, FD | Linux 以整數代表開啟資源的方式，`stdin=0`、`stdout=1` |
+| 虛擬檔案系統 | Virtual File System, VFS | 將一般檔案、裝置、`procfs`、`sysfs` 統一在檔案介面下 |
+| 字元裝置 | Character Device | 以串流方式 `read/write` 的裝置介面，常見於 `/dev/*` |
+| 程式間通訊 | Inter-Process Communication, IPC | 不同行程交換資料的方法 |
+| 共享記憶體 | Shared Memory | 多個執行實體看到同一份資料頁面 |
+| 零拷貝 | Zero-Copy | 傳遞過程不需要額外 `copy_from_user()` / `copy_to_user()` |
+| 環形緩衝區 | Ring Buffer / Circular Buffer | 用 `head` / `tail` 管理固定容量資料區 |
+| 互斥鎖 | Mutex | 可睡眠鎖，適合 process context 的互斥 |
+| 自旋鎖 | Spinlock | 忙等鎖，不可在持鎖期間睡眠 |
+| 等待佇列 | Wait Queue | 條件未成立時讓執行緒睡眠，成立後再喚醒 |
+| 原子變數 | Atomic Variable, `atomic_t` / `atomic64_t` | 適合簡單計數與 lock-free 狀態欄位 |
+| 記憶體屏障 | Memory Barrier | 保證讀寫可見順序，不讓 CPU / compiler 任意重排 |
+| 裝置樹 | Device Tree, DT | 用資料結構描述硬體，而不是把硬體資訊硬寫在 driver C code 裡 |
+| 平台驅動 | Platform Driver | 常見於 SoC / embedded Linux 的 driver 類型，透過 Device Tree 配對 |
+| 記憶體映射 I/O | Memory-Mapped I/O, MMIO | 用記憶體位址存取硬體暫存器 |
+| 追蹤 | Trace / Tracing | 對事件、狀態、時間或資料內容進行可重建的記錄 |
+| 可觀測性 | Observability | 系統是否能被測量、定位、解釋問題 |
 
-`fwsh/include/shell.h` 定義了兩個最重要的資料結構：`Cmd` 與 `Pipeline`。
+---
 
-`Cmd` 表示 pipeline 中的一段命令。例如：
+## 5. 各子專案深入分析
 
-```bash
-cat firmware.bin | hexdump 0x100 > dump.txt
-```
+## 5.1 `fwsh`：從 Shell 看懂 POSIX 系統程式
 
-這裡有兩個 `Cmd`：第一個是 `cat firmware.bin`，第二個是 `hexdump 0x100 > dump.txt`。
+### 5.1.1 它不是「只會跑 command」的玩具
 
-`Cmd` 裡的欄位用途如下：
+`fwsh` 的重點不是把 `system()` 包起來，而是自己實作 shell 核心骨架：
 
-- `argv[MAX_ARGS]`：傳給 `execvp()` 的參數陣列，必須以 `NULL` 結尾。
-- `argc`：參數數量。
-- `in_file`：若命令有 `< file`，這裡保存輸入檔案名稱。
-- `out_file`：若命令有 `> file` 或 `>> file`，這裡保存輸出檔案名稱。
-- `out_append`：區分覆寫輸出 `>` 與附加輸出 `>>`。
+- parser
+- executor
+- REPL
+- built-in command dispatch
+- signal handling
 
-`Pipeline` 則表示整行命令：
+### 5.1.2 Parser（語法解析器）怎麼做
 
-- `cmds[MAX_PIPES]`：最多 16 段 pipeline command。
-- `ncmds`：實際命令數。
-- `background`：是否使用 `&` 背景執行。
+`fwsh/src/parser.c` 採用「簡單 lexer + 遞增建構」模式，把命令列解析成 `Pipeline` 與 `Cmd`。
 
-### Parser：如何把文字命令變成資料結構
+它能處理：
 
-`fwsh/src/parser.c` 使用一個簡單的 Lexer 掃描輸入字串。Lexer 保存：
+- 一般 token
+- `|`
+- `<`
+- `>`
+- `>>`
+- `&`
+- 單引號與雙引號
 
-- `input`：原始命令列字串。
-- `pos`：目前掃描位置。
-
-Parser 的核心流程是逐字掃描，遇到不同符號時執行不同語意：
-
-- 遇到一般字串：放進目前 `Cmd.argv`。
-- 遇到 `|`：切換到下一個 `Cmd`。
-- 遇到 `<`：讀取後面的 filename，放入 `cur->in_file`。
-- 遇到 `>`：讀取後面的 filename，放入 `cur->out_file`。
-- 遇到 `>>`：同樣設定 `out_file`，但 `out_append = 1`。
-- 遇到 `&`：設定 `pipeline->background = 1`。
-
-例如輸入：
+例如：
 
 ```bash
 cat firmware.bin | hexdump 0x40 > dump.txt &
@@ -157,591 +185,1120 @@ cat firmware.bin | hexdump 0x40 > dump.txt &
 
 會被解析成：
 
-```text
-Pipeline
-  ncmds = 2
-  background = 1
-  cmds[0]
-    argv = ["cat", "firmware.bin", NULL]
-  cmds[1]
-    argv = ["hexdump", "0x40", NULL]
-    out_file = "dump.txt"
-    out_append = 0
-```
+- `ncmds = 2`
+- `background = 1`
+- 第 1 段：`cat firmware.bin`
+- 第 2 段：`hexdump 0x40 > dump.txt`
 
-Parser 也支援單引號與雙引號。單引號內的內容被視為 literal；雙引號內支援 `\"` 與 `\\` 這類基本 escape。這表示：
+這個設計很重要，因為 shell 真正困難的地方不在執行，而在於先把「文字」準確轉成「結構化語意」。
 
-```bash
-echo "hello world"
-```
+### 5.1.3 Executor（執行器）怎麼把 pipeline 接起來
 
-會把 `hello world` 當成同一個參數，而不是兩個參數。
+`fwsh/src/executor.c` 的技術核心是：
 
-### Executor：Pipeline 如何真正執行
+- `pipe()`
+- `fork()`
+- `dup2()`
+- `execvp()`
+- `waitpid()`
 
-`fwsh/src/executor.c` 是 Shell 最重要的部分，因為它把 `Pipeline` 轉換成 process 與 file descriptor 的連接圖。
+對 `A | B | C` 而言，shell 必須先建立兩組 pipe，再讓：
 
-以：
+- `A` 的 `stdout` 指向第一組 pipe 的 write end
+- `B` 的 `stdin` 指向第一組 pipe 的 read end
+- `B` 的 `stdout` 指向第二組 pipe 的 write end
+- `C` 的 `stdin` 指向第二組 pipe 的 read end
 
-```bash
-A | B | C
-```
+這件事不是抽象概念，而是實際的 file descriptor 重新接線。  
+若 parent 或 child 沒有正確關閉不再使用的 pipe fd，讀端永遠等不到 EOF，pipeline 就會卡住。這是很多初學者 shell 會犯的典型錯誤。
 
-為例，需要兩組 pipe：
+### 5.1.4 Built-in command 為何用 dispatch table
 
-```text
-A stdout -> pipe[0] write end
-B stdin  <- pipe[0] read end
-B stdout -> pipe[1] write end
-C stdin  <- pipe[1] read end
-```
+`fwsh/src/builtin.c` 用函式指標表（function pointer dispatch table）管理 built-in command：
 
-Executor 的流程如下：
+- `cd`
+- `pwd`
+- `history`
+- `exit`
+- `hexdump`
+- `crc32`
+- `memmap`
 
-1. 計算 `npipes = ncmds - 1`。
-2. 使用 `pipe(pipes[i])` 建立所有 pipe。
-3. 對每個 command 呼叫 `fork()`。
-4. 在 child process 中，根據 command 位置使用 `dup2()` 重新接線：
-   - 若不是第一個 command：`dup2(pipes[i - 1][0], STDIN_FILENO)`。
-   - 若不是最後一個 command：`dup2(pipes[i][1], STDOUT_FILENO)`。
-5. Child 關閉所有不再需要的 pipe fd。
-6. Child 執行 built-in 或 `execvp()`。
-7. Parent 關閉所有 pipe fd。
-8. 若不是背景執行，parent 用 `waitpid()` 等待 child 結束。
+這種設計的好處是擴充性非常清楚：
 
-這裡最重要的是「關閉不需要的 file descriptor」。如果 parent 或某個 child 保留了 pipe 的 write end，讀端就可能永遠等不到 EOF，造成 pipeline 卡住。例如 `cat file | grep abc`，如果還有某個 process 沒關掉 write end，`grep` 可能以為後面還會有資料，因此不結束。
+1. 實作新函式。
+2. 在表格中新增一筆。
 
-### I/O Redirection：`dup2()` 的角色
+不需要改一長串 `if/else`。  
+這種 pattern 在 firmware command table、bootloader monitor、CLI-based embedded diagnostic tool 中非常常見。
 
-`setup_redirections()` 處理 `<`、`>`、`>>`：
+### 5.1.5 這個專案的工程價值
 
-- `< file`：`open(file, O_RDONLY)`，然後 `dup2(fd, STDIN_FILENO)`。
-- `> file`：`open(file, O_WRONLY | O_CREAT | O_TRUNC, 0644)`，然後 `dup2(fd, STDOUT_FILENO)`。
-- `>> file`：`open(file, O_WRONLY | O_CREAT | O_APPEND, 0644)`，然後 `dup2(fd, STDOUT_FILENO)`。
+`fwsh` 真正訓練的是：
 
-`dup2(oldfd, newfd)` 的意思是：讓 `newfd` 指向 `oldfd` 所代表的 open file description。當 stdout 被換成檔案 fd 後，程式本身仍然只是呼叫 `printf()` 或寫 `STDOUT_FILENO`，但輸出會流到檔案。
+- process lifecycle 思維
+- fd ownership 思維
+- 文字命令到結構化資料的解析能力
+- 可擴充命令框架設計
 
-### Built-in Dispatch Table
+這些能力後續會直接延伸到 driver 介面設計與 trace 工具設計。
 
-`fwsh/src/builtin.c` 使用 dispatch table 管理 built-in command：
+---
 
-```c
-typedef struct {
-  const char* name;
-  int (*func)(Cmd*);
-  const char* desc;
-} BuiltinEntry;
-```
+## 5.2 `chardev-driver`：VFS、`ioctl`、`procfs`、`sysfs` 的入門完整體
 
-這種設計的優點是擴充容易。要新增一個內建命令，不需要寫一大串 `if-else`，只要：
+### 5.2.1 這個 driver 具備哪些介面
 
-1. 實作 `static int builtin_xxx(Cmd* cmd)`。
-2. 在 `builtins[]` 增加 `{ "xxx", builtin_xxx, "description" }`。
+`chardev-driver/driver/chardev.c` 同時實作：
 
-這是典型的 Function Pointer（函式指標）應用，也是一種簡單的 Command Dispatch Table（命令分派表）。
+- `/dev/chardev0`
+- `/proc/chardev_info`
+- `/sys/class/chardev/chardev0/*`
+- `ioctl`
 
-### Firmware Utility：hexdump
+這表示同一個 driver 同時提供：
 
-`hexdump` 用 16 bytes 為一列輸出：
+- data path
+- control path
+- status path
 
-- Offset：資料位移。
-- Hex view：每個 byte 的 16 進位表示。
-- ASCII view：可顯示字元直接顯示，不可顯示字元以 `.` 代替。
+這是非常完整的教學型設計。
 
-這對韌體開發很實用。例如檢查 firmware image 的 header、magic number、version field、checksum field。若某個 binary 開頭應該是 `0x7F 45 4C 46`，hexdump 可直接檢查它是否為 ELF。
+### 5.2.2 `file_operations` 是 user-kernel 介面的核心
 
-### Firmware Utility：CRC-32
+這個專案透過 `struct file_operations` 把 userspace 的檔案操作對應到 driver 函式：
 
-`crc32` 實作 IEEE 802.3 CRC-32，使用 table-driven 演算法。核心觀念是先建立 256 筆查表資料，之後每處理一個 byte 時用：
+- `.open`
+- `.read`
+- `.write`
+- `.unlocked_ioctl`
+- `.release`
 
-```text
-crc = table[(crc XOR byte) & 0xFF] XOR (crc >> 8)
-```
-
-CRC-32 的常見用途：
-
-- Bootloader 驗證 firmware image 是否損壞。
-- OTA update 驗證下載內容是否完整。
-- 通訊協定封包檢查，例如 UART / SPI frame。
-- Flash dump 與 golden image 比對。
-
-本專案使用 `0xEDB88320`，這是 IEEE CRC-32 常見的 reflected polynomial。初始值為 `0xFFFFFFFF`，最後再 XOR `0xFFFFFFFF`，這是標準 CRC-32 流程。
-
-### Signal Handling
-
-`fwsh/src/shell.c` 設定三種重要 signal：
-
-- `SIGCHLD`：child process 結束時通知 parent。handler 使用 `waitpid(-1, NULL, WNOHANG)` 回收 zombie process。
-- `SIGINT`：使用者按 `Ctrl+C`。Shell 本身不退出，而是清空目前輸入列並重新顯示 prompt。
-- `SIGTSTP`：使用者按 `Ctrl+Z`。Shell 直接忽略，避免互動 Shell 自己被 suspend。
-
-其中 `SIGCHLD` 對 background execution 很關鍵。如果背景 process 結束但 parent 沒有 wait，它會變成 zombie process。這裡透過 `WNOHANG` 非阻塞回收，避免 Shell 卡住。
-
-## 子專案二：chardev-driver Character Device Driver
-
-### 設計目標
-
-`chardev-driver` 是一個自訂 Linux Character Device Driver，提供 `/dev/chardev0` 讓 User Space 讀寫。它不只實作 read/write，還提供三種常見 Linux driver interface：
-
-- `/dev/chardev0`：主要資料通道，透過 VFS file operations。
-- `/proc/chardev_info`：狀態觀測，適合輸出人類可讀的 driver 狀態。
-- `/sys/class/chardev/chardev0/*`：屬性控制與查詢，適合單一設定值與統計值。
-- `ioctl()`：命令式控制，例如 reset buffer、讀取長度、設定 read-only。
-
-### Driver 狀態設計
-
-`chardev.c` 使用一個 static 全域 `drv` 保存驅動狀態：
-
-- `buf`：kernel buffer，大小 `BUF_SIZE = 4096`。
-- `buf_len`：目前有效資料長度。
-- `read_only`：是否拒絕寫入。
-- `open_count`、`read_count`、`write_count`：使用 `atomic_t` 記錄操作次數。
-- `lock`：`struct mutex`，保護 buffer 與長度。
-- `devno`：major/minor device number。
-- `cdev`：character device core structure。
-- `cls`、`dev`：class 與 device，用於 sysfs 與 udev device node。
-- `proc_entry`：`/proc/chardev_info` entry。
-
-這個設計把「資料」、「同步」、「Linux 註冊資源」放在同一個 driver-private state 裡，方便 init 與 exit 統一管理。
-
-### Module Init Trace
-
-`chardev_init()` 的流程非常典型，值得逐步追：
-
-1. `kzalloc(BUF_SIZE, GFP_KERNEL)` 配置 kernel buffer。
-2. `mutex_init()` 初始化鎖。
-3. `atomic_set()` 初始化統計計數器。
-4. `alloc_chrdev_region(&drv.devno, 0, 1, DRIVER_NAME)` 動態取得 major/minor。
-5. `cdev_init(&drv.cdev, &chardev_fops)` 綁定 file operations。
-6. `cdev_add(&drv.cdev, drv.devno, 1)` 把 character device 加入 kernel。
-7. `class_create(CLASS_NAME)` 建立 `/sys/class/chardev`。
-8. 設定 `drv.cls->dev_groups = chardev_groups`，讓 device 建立時一起建立 sysfs attributes。
-9. `device_create()` 建立 `/sys/class/chardev/chardev0`，也讓 udev 可建立 `/dev/chardev0`。
-10. `proc_create("chardev_info", 0444, NULL, &chardev_proc_ops)` 建立 `/proc/chardev_info`。
-
-若中途失敗，程式用 `goto err_xxx` 逆向釋放已取得的資源。這是 kernel code 常見寫法，因為 init 可能在任一階段失敗，必須保證不留下半初始化資源。
-
-### Read Trace：`cat /dev/chardev0`
-
-當使用者執行：
-
-```bash
-cat /dev/chardev0
-```
-
-大致流程是：
-
-1. `cat` 呼叫 `open("/dev/chardev0", O_RDONLY)`。
-2. VFS 呼叫 `chardev_open()`，`open_count` 增加。
-3. `cat` 呼叫 `read(fd, ubuf, count)`。
-4. VFS 呼叫 `chardev_read()`。
-5. Driver 檢查 `*ppos >= drv.buf_len`，若已讀完則回傳 0，代表 EOF。
-6. Driver 進入 `mutex_lock(&drv.lock)`。
-7. 計算可複製長度：`min(drv.buf_len - *ppos, count)`。
-8. 使用 `copy_to_user(ubuf, drv.buf + *ppos, to_copy)` 把 kernel buffer 複製到 user buffer。
-9. 更新 `*ppos`，增加 `read_count`。
-10. `mutex_unlock()`。
-11. 回傳實際讀取 byte 數。
-
-這裡的 `*ppos` 是 file position。若不更新它，`cat` 可能一直讀到同一段資料，無法得到 EOF。
-
-### Write Trace：`echo "Firmware Engineer" > /dev/chardev0`
-
-當使用者執行：
+所以：
 
 ```bash
 echo "Firmware Engineer" > /dev/chardev0
+cat /dev/chardev0
 ```
 
-大致流程是：
+背後其實是：
 
-1. Shell 開啟 `/dev/chardev0`。
-2. `echo` 或 shell redirection 寫入資料。
-3. VFS 呼叫 `chardev_write()`。
-4. Driver 先檢查 `drv.read_only`。若為 1，回傳 `-EACCES`，User Space 會看到 permission 類錯誤。
-5. 若 `count > BUF_SIZE`，限制最大寫入長度為 4096。
-6. `mutex_lock()` 保護 buffer。
-7. `copy_from_user(drv.buf, ubuf, count)` 把 user buffer 複製進 kernel buffer。
-8. 更新 `drv.buf_len` 與 `*ppos`。
-9. 增加 `write_count`。
-10. `mutex_unlock()`。
-11. 回傳實際寫入 byte 數。
+1. shell 發出 `write()`
+2. VFS 導向 `chardev_write()`
+3. driver 用 `copy_from_user()` 把資料放進 kernel buffer
+4. `cat` 呼叫 `read()`
+5. VFS 導向 `chardev_read()`
+6. driver 用 `copy_to_user()` 把資料傳回 userspace
 
-`copy_from_user()` 可能沒有完整複製，所以程式用 `count - not_copied` 作為實際寫入長度。這是 kernel user access API 的正確思路：不能假設 user pointer 永遠有效。
+### 5.2.3 為什麼要同時做 `procfs` 和 `sysfs`
 
-### ioctl：命令式控制介面
+兩者用途不同：
 
-`ioctl` 適合處理「不是單純 read/write」的控制命令。本專案在 `chardev.h` 定義：
+- `procfs` 偏向狀態報告與偵錯資訊
+- `sysfs` 偏向裝置屬性與控制介面
+
+在這個專案中：
+
+- `/proc/chardev_info` 會列出 buffer 狀態與計數器
+- `sysfs` 的 `read_only` 可以直接切換唯讀模式
+- `sysfs` 的 `stats` 與 `buf_len` 讓狀態更容易被腳本讀取
+
+這種拆法很合理，因為它把「觀察」與「控制」分開了。
+
+### 5.2.4 `ioctl` 的角色
+
+這個 driver 的 `ioctl` 用於做不適合單純 `read/write` 的控制：
+
+- reset buffer
+- get length
+- set read-only
+
+`ioctl`（Input/Output Control）常被濫用，但這個專案的使用方式是合理的：  
+它把「非串流資料交換，而是命令型控制」的需求清楚獨立出來。
+
+### 5.2.5 這個專案的教學重點
+
+如果要學 Linux driver，這個專案很適合作為第一個完整範例，因為它一次把下面這些概念串起來：
+
+- `alloc_chrdev_region()`
+- `cdev_add()`
+- `class_create()`
+- `device_create()`
+- `copy_to_user()` / `copy_from_user()`
+- `proc_create()` + `seq_file`
+- sysfs attribute
+- `ioctl`
+- `mutex`
+
+---
+
+## 5.3 `qemu-platform-demo`：Embedded Linux bring-up 的標準路徑
+
+### 5.3.1 這個專案回答的不是「怎麼寫一個 driver」而已
+
+它回答的是更完整的 embedded Linux 問題：
+
+1. ARM64 kernel 怎麼建？
+2. Device Tree 怎麼補 node？
+3. out-of-tree platform driver 怎麼編？
+4. rootfs / initramfs 怎麼組？
+5. QEMU 怎麼把整個系統跑起來？
+
+### 5.3.2 Device Tree 與 `compatible`
+
+`qemu-platform-demo/dts/myled-fragment.dts` 新增了一個虛擬 LED controller：
+
+```dts
+compatible = "myvendor,myled-v1";
+reg = <0x0 0x10010000 0x0 0x1000>;
+num-leds = <4>;
+default-brightness = <180>;
+```
+
+這幾個欄位的工程意義很明確：
+
+- `compatible`：決定哪個 driver 可以 match
+- `reg`：MMIO 位址與大小
+- `num-leds`：driver 可讀取的自訂屬性
+- `default-brightness`：初始化行為
+
+### 5.3.3 Platform Driver 的 `probe()` 如何被觸發
+
+`qemu-platform-demo/driver/myled_ctrl.c` 定義 OF match table：
 
 ```c
-#define CHARDEV_MAGIC 'k'
-#define IOCTL_RESET_BUF _IO(CHARDEV_MAGIC, 0)
-#define IOCTL_GET_LEN _IOR(CHARDEV_MAGIC, 1, int)
-#define IOCTL_SET_RDONLY _IOW(CHARDEV_MAGIC, 2, int)
+{ .compatible = "myvendor,myled-v1" }
 ```
 
-三個 macro 的意思：
+kernel 開機解析 DTB 後，若找到相容節點，便建立 platform device，接著呼叫 driver 的 `probe()`。
 
-- `_IO`：不帶資料方向，適合 reset 這種命令。
-- `_IOR`：Kernel to User，driver 回傳資料給 user。
-- `_IOW`：User to Kernel，user 傳資料給 driver。
+`probe()` 內部做的事情包含：
 
-`chardev_ioctl()` 先檢查：
+- 解析 Device Tree property
+- 取得 MMIO resource
+- `devm_ioremap_resource()` 映射暫存器區
+- 初始化 driver private data
+- 建立 sysfs attribute group
 
-```c
-if (_IOC_TYPE(cmd) != CHARDEV_MAGIC) return -ENOTTY;
-if (_IOC_NR(cmd) > CHARDEV_MAGIC_MAX) return -ENOTTY;
-```
+### 5.3.4 為什麼這個 driver 有 simulated mode
 
-這可以避免錯誤或不屬於本 driver 的 ioctl command 被誤處理。
+`myled_ctrl.c` 很值得注意的一點是：若硬體 MMIO 區沒有真實回應，它會退回 simulated mode，用 shadow register array 模擬暫存器。
 
-三個 ioctl 的行為：
+這不是偷懶，而是很實際的 demo engineering：
 
-- `IOCTL_RESET_BUF`：清空 `drv.buf`，將 `buf_len` 設為 0。
-- `IOCTL_GET_LEN`：把 `drv.buf_len` 透過 `copy_to_user()` 回傳。
-- `IOCTL_SET_RDONLY`：透過 `copy_from_user()` 讀入 int，設定 `drv.read_only`。
+- 可以在 QEMU 上穩定跑
+- 可以保留 register-model 與 sysfs 控制流程
+- 可以把重點放在 platform driver lifecycle，而不是卡在不存在的真實硬體
 
-### procfs：狀態快照
+### 5.3.5 這個專案最重要的價值
 
-`/proc/chardev_info` 使用 `seq_file` 輸出 driver 狀態：
+很多人會寫 module，但不熟完整 bring-up 流程。  
+這個專案的價值在於它展示了：
+
+- kernel
+- DTB
+- driver
+- rootfs
+- QEMU
+
+這五者如何在同一條路徑上整合。
+
+---
+
+## 5.4 `isr_dma_demo`：高頻資料路徑、DMA ring buffer 與多層 trace
+
+### 5.4.1 這是本 repository 最值得深挖的 kernel data-path 專案之一
+
+`isr_dma_demo/kernel/isr_dma_module.c` 做的事情非常具體：
+
+1. 用 `hrtimer` 模擬高頻 ISR-like producer。
+2. 每 500 us 產生一筆固定大小資料。
+3. 寫入共享 ring buffer。
+4. userspace 透過 `read()` 或 `mmap()` 嘗試消費。
+5. 用 `/proc`、`dmesg`、hexdump、benchmark 組成完整 observability surface。
+
+### 5.4.2 Ring buffer layout 很清楚
+
+共享記憶體前半部放 control block：
+
+- `head`
+- `tail`
+- `slots`
+- `slot_size`
+- `isr_count`
+- `drop_count`
+
+後半部放實際 payload。
+
+每個 slot 64 bytes：
+
+- 前 8 bytes：timestamp
+- 接著 8 bytes：ISR counter
+- 剩餘 48 bytes：`0xAB` pattern fill
+
+這個設計的優點是資料內容可被直接驗證，不只是「看起來有資料」。
+
+### 5.4.3 為什麼要用 `dma_alloc_coherent()`
+
+這個專案想展示的是 DMA-coherent shared buffer 的概念。  
+若配置成功：
+
+- kernel 與 potential DMA device 對這塊記憶體有一致觀點
+- 不需要手動 cache flush
+
+若平台條件不允許，專案會 fallback 到 `vzalloc()`。  
+這一點也寫得很誠實：fallback 可以維持 demo 可執行，但語義上不再是「真正 DMA-coherent 配置」。
+
+### 5.4.4 `mmap()` 與 `read()` 是兩條不同成本路徑
+
+- `read()`：每次取一個 slot，kernel 需要 `copy_to_user()`
+- `mmap()`：使用者先映射整塊共享區，之後直接從共享頁面讀
+
+這正是 zero-copy 教學的核心。
+
+### 5.4.5 目前程式狀態必須講精確
+
+依目前 repository 內容：
+
+- module load 正常
+- `/dev/isr_dma` 正常
+- `/proc/isr_dma_stats` 正常
+- `read()` 路徑可工作
+- `mmap()` benchmark path 的程式碼存在
+- 但目前 userspace mapping 大小與 kernel 匯出大小不一致，因此 `mmap()` 目前會回 `EINVAL`
+
+這表示此專案**非常有教學價值**，但 `mmap end-to-end benchmark` 目前不是完成狀態。這一點在技術報告裡必須講清楚，不能模糊帶過。
+
+---
+
+## 5.5 `cpu-scheduling-qemu`：不是 kernel scheduler，而是可觀測的 scheduling simulator
+
+### 5.5.1 先澄清定位
+
+這個專案不是修改 Linux kernel scheduler。  
+它也不是用 `ftrace`、`perf`、`eBPF` 去抓真實核心排程事件。
+
+它是：
+
+- 用 C 實作 FCFS / SJF / SRTF / Priority / RR
+- 用固定 workload 驗證
+- 用 QEMU VM 建出可重現執行環境
+- 用 `GanttSlot` 與 `BENCHMARK` 行輸出 execution trace 與 benchmark telemetry
+
+### 5.5.2 `gantt_push()` 是這個專案的靈魂
+
+`cpu-scheduling-qemu/src/scheduler.c` 中，`gantt_push()` 不只是 append，而是做 trace 壓縮：
+
+- 如果上一個區段與目前 PID 相同，直接延長 end time
+- 否則新增新的 `GanttSlot`
+
+這使得逐時間單位的 SRTF 決策，不會輸出一堆難讀的碎片。
+
+例如連續四個 tick 都是 `P2`：
 
 ```text
-=== chardev driver status ===
-buf_len    : 18
-read_only  : 0
-open_count : 2
-read_count : 1
-write_count: 1
-buf_content: Firmware Engineer
+(P2,1,2) (P2,2,3) (P2,3,4) (P2,4,5)
 ```
 
-`seq_file` 是 kernel 推薦用於 procfs 輸出的機制之一。它比手動處理 offset 與 buffer 更安全，也更適合輸出多行狀態資訊。這裡搭配 `single_open()`，表示每次讀取只需要產生一份簡單內容。
-
-### sysfs：屬性式控制
-
-sysfs 的設計精神是「一個檔案對應一個屬性」。本 driver 提供：
-
-- `buf_len`：read-only，顯示 buffer 長度。
-- `read_only`：read-write，可讀取或設定 read-only mode。
-- `stats`：read-only，顯示 open/read/write 次數。
-
-例如：
-
-```bash
-cat /sys/class/chardev/chardev0/buf_len
-echo 1 | sudo tee /sys/class/chardev/chardev0/read_only
-cat /sys/class/chardev/chardev0/stats
-```
-
-`read_only_store()` 使用 `kstrtoint()` 將文字轉成整數，再用 `!!val` 轉成 0 或 1。這是 sysfs store callback 常見寫法，因為 sysfs 寫入本質上是文字。
-
-## 子專案三：qemu-platform-demo ARM64 Platform Driver
-
-### 設計目標
-
-`qemu-platform-demo` 建立一個完整的 embedded Linux driver 驗證環境：
-
-1. 下載並建置 ARM64 Linux kernel。
-2. 從 QEMU virt machine dump 出 base DTB。
-3. 將自訂 Device Tree overlay 合併到 base DTB。
-4. 建置 out-of-tree platform driver `myled_ctrl.ko`。
-5. 建立 BusyBox initramfs。
-6. 用 QEMU 啟動 ARM64 Linux。
-7. 在 initramfs 中載入 driver 並透過 sysfs 測試。
-
-這非常接近真實 BSP（Board Support Package）或 driver bring-up 的流程，只是硬體由 QEMU 虛擬平台取代。
-
-### Device Tree Overlay Trace
-
-`qemu-platform-demo/dts/patch_dtb.sh` 的流程：
-
-1. 使用 QEMU dump base DTB：
-
-```bash
-qemu-system-aarch64 \
-    -machine virt,dumpdtb=qemu-virt-base.dtb \
-    -cpu cortex-a57 \
-    -kernel ${KERNEL} \
-    -nographic
-```
-
-2. 使用 `dtc` 將 DTS overlay 編成 DTBO：
-
-```bash
-dtc -I dts -O dtb -@ -o myled-fragment.dtbo myled-fragment.dts
-```
-
-3. 使用 `fdtoverlay` 合併 base DTB 與 overlay：
-
-```bash
-fdtoverlay -i qemu-virt-base.dtb -o qemu-virt-myled.dtb myled-fragment.dtbo
-```
-
-4. 再用 `dtc -I dtb -O dts` 反編譯確認 `myled-controller` 節點存在。
-
-這個流程的重點是：driver 不需要知道自己跑在 QEMU 或真板子上，它只依賴 Device Tree 提供的硬體描述。
-
-### Platform Driver Probe Trace
-
-`myled_ctrl.c` 的核心是：
-
-```c
-static struct platform_driver myled_driver = {
-    .probe = myled_probe,
-    .remove = myled_remove,
-    .driver = {
-        .name = "myled_ctrl",
-        .of_match_table = myled_of_match,
-        .pm = &myled_pm_ops,
-    },
-};
-
-module_platform_driver(myled_driver);
-```
-
-`module_platform_driver()` 會產生 module init / exit glue code。當 module 載入後，kernel 會註冊這個 platform driver；若系統中已有 compatible 相符的 platform device，就會呼叫 `myled_probe()`。
-
-`myled_probe()` 主要做以下事情：
-
-1. `devm_kzalloc()` 配置 `struct myled_priv`。
-2. 初始化 `spinlock_t lock`。
-3. 使用 `of_property_read_u32()` 讀取 `num-leds`。
-4. 使用 `of_property_read_string()` 讀取 `label`。
-5. 使用 `platform_get_resource(pdev, IORESOURCE_MEM, 0)` 取得 `reg` 對應的 MMIO resource。
-6. 使用 `devm_ioremap_resource()` 將 MMIO physical address 映射成 kernel virtual address。
-7. 若沒有真實 MMIO 回應，切換為 simulated mode。
-8. `platform_set_drvdata()` 與 `dev_set_drvdata()` 保存 private data。
-9. 呼叫 `myled_hw_init()` 初始化控制器。
-10. `sysfs_create_group()` 建立 `/sys/bus/platform/devices/.../myled/`。
-11. `pm_runtime_enable()` 啟用 runtime PM 框架。
-
-### Simulated MMIO：為什麼需要 shadow register
-
-在真實硬體上，`reg = <0x0 0x10010000 0x0 0x1000>` 代表從 physical address `0x10010000` 開始的一段 MMIO register bank。Driver 可以透過 `readl()` / `writel()` 讀寫硬體暫存器。
-
-但 QEMU virt machine 並沒有真的實作這個 LED controller。若 driver 直接讀不存在的硬體，可能得到無效值。因此 `myled_ctrl.c` 設計了 simulated mode：
-
-- `priv->base`：真實 MMIO 模式使用。
-- `priv->sim_regs[]`：模擬模式使用的 shadow register bank。
-- `priv->simulated`：決定 read/write 走哪條路。
-
-Register helper：
-
-```c
-static u32 myled_reg_read(struct myled_priv* priv, u32 off) {
-  if (priv->simulated)
-    val = priv->sim_regs[off / 4];
-  else
-    val = readl(priv->base + off);
-}
-```
-
-這讓同一套上層 sysfs 與 driver logic 可以同時支援真實硬體與 QEMU demo。若未來有真正的 MMIO device，只要 Device Tree 的 `reg` 對應到有效硬體，driver 就可以改走 `readl()` / `writel()`。
-
-### Register Model
-
-`myled_ctrl.h` 定義了一組虛擬暫存器：
-
-| Register | Offset | 用途 |
-|---|---:|---|
-| `MYLED_REG_CTRL` | `0x00` | 控制 enable、blink、PWM auto |
-| `MYLED_REG_BRIGHTNESS` | `0x04` | 亮度，最大 255 |
-| `MYLED_REG_COLOR` | `0x08` | RGB 顏色，格式為 `0xRRGGBB` |
-| `MYLED_REG_STATUS` | `0x0C` | ready / fault 狀態 |
-| `MYLED_REG_VERSION` | `0x10` | 硬體版本，預期 `0xAB01` |
-
-Control register bit field：
-
-- `MYLED_CTRL_ENABLE = BIT(0)`
-- `MYLED_CTRL_BLINK = BIT(1)`
-- `MYLED_CTRL_PWM_AUTO = BIT(2)`
-
-Status register bit field：
-
-- `MYLED_STATUS_READY = BIT(0)`
-- `MYLED_STATUS_FAULT = BIT(1)`
-
-這種 register offset + bit field 的寫法很接近真實 embedded driver。硬體規格書通常會列出 register map，driver 會用 macro 表示 offset 與 bit mask。
-
-### sysfs Interface
-
-Driver 建立一個 `myled` attribute group：
+會被壓縮成：
 
 ```text
-/sys/bus/platform/devices/10010000.myled-controller/myled/
+(P2,1,5)
 ```
 
-裡面包含：
+這是很標準、很實用的 trace compression 思維。
 
-- `enable`：讀寫 LED enable bit。
-- `brightness`：讀寫亮度，範圍 0 到 255。
-- `color`：讀寫 RGB 顏色，使用 16 進位文字，例如 `ff3300`。
-- `blink`：讀寫 blink bit。
-- `status`：讀取 ready / fault。
-- `info`：輸出版本、LED 數量、simulated mode、control register、brightness、color。
+### 5.5.3 為什麼 SRTF 最能看出 trace 的價值
 
-例如：
+因為 SRTF 會 preempt。  
+只看最後平均值，你不知道中間何時切換；  
+有 `GanttSlot`，你才真的看得到：
 
-```bash
-echo 200 > /sys/bus/platform/devices/10010000.myled-controller/myled/brightness
-cat /sys/bus/platform/devices/10010000.myled-controller/myled/brightness
+- 哪個工作被打斷
+- 新工作在哪個時間點插入
+- preemption 是不是符合演算法定義
 
-echo ff3300 > /sys/bus/platform/devices/10010000.myled-controller/myled/color
-cat /sys/bus/platform/devices/10010000.myled-controller/myled/color
-```
+### 5.5.4 `BENCHMARK ...` 行是結構化 trace
 
-`brightness_store()` 使用 `kstrtou32()` 將 sysfs 文字轉成 `u32`，並檢查是否大於 `MYLED_MAX_BRIGHTNESS`。若超過 255，回傳 `-EINVAL`。這是 driver interface 設計中很重要的一點：Kernel 端必須驗證 User Space 輸入，不可相信輸入永遠合法。
-
-### QEMU Boot Trace
-
-`qemu-platform-demo/scripts/05_run_qemu.sh` 啟動流程：
-
-```bash
-qemu-system-aarch64 \
-    -machine virt \
-    -cpu cortex-a57 \
-    -m 512M \
-    -nographic \
-    -kernel linux-6.6.30/arch/arm64/boot/Image \
-    -dtb dts/qemu-virt-myled.dtb \
-    -initrd rootfs/initramfs.cpio.gz \
-    -append "console=ttyAMA0 earlycon=pl011,0x9000000 rdinit=/init loglevel=7"
-```
-
-參數意義：
-
-- `-machine virt`：使用 QEMU ARM virt machine。
-- `-cpu cortex-a57`：模擬 ARM Cortex-A57 CPU。
-- `-m 512M`：提供 512 MB RAM。
-- `-nographic`：使用終端機 console，不開圖形視窗。
-- `-kernel`：指定 ARM64 kernel Image。
-- `-dtb`：指定已合併 myled overlay 的 DTB。
-- `-initrd`：指定 initramfs。
-- `-append`：傳給 kernel 的 bootargs。
-
-其中 `rdinit=/init` 讓 kernel 在 initramfs 中執行 `/init`。`/init` 掛載 procfs、sysfs、devtmpfs，載入 `myled_ctrl.ko`，然後執行 `/test_myled.sh`。
-
-### 測試腳本 Trace
-
-`rootfs/overlay/test_myled.sh` 會：
-
-1. 在 `/sys/bus/platform/devices` 找名稱包含 `10010000` 的 device。
-2. 設定 `MYLED="${SYSFS_BASE}/${DEV}/myled"`。
-3. 檢查 `info`、`enable`、`brightness`、`color`、`blink`、`status` 是否存在。
-4. 寫入 `brightness = 200` 並讀回確認。
-5. 寫入 `color = ff3300` 並讀回確認。
-6. 寫入 `blink = 1` 並讀回確認。
-7. 寫入 `enable = 0` 並讀回確認。
-8. 輸出 `info` 與相關 `dmesg`。
-
-這是一個很好理解的 driver validation pattern：每個 sysfs attribute 都用 write-then-read-back 驗證，並用 dmesg 補充 driver 內部 trace。
-
-## 三個專案的技術連結
-
-這三個子專案不是彼此獨立的玩具，而是同一條 Linux 系統軟體路徑上的不同層次。
-
-第一層，`fwsh` 建立 User Space 基礎。它處理 process、file descriptor、pipe、signal。這些是理解 Linux 的必要能力，因為 Linux 幾乎所有抽象都會回到 process 與 file。
-
-第二層，`chardev-driver` 進入 Kernel Space。它展示當 User Space 呼叫 `open()`、`read()`、`write()`、`ioctl()` 時，Kernel Driver 如何接住這些操作。這補上了「系統呼叫背後發生什麼」的理解。
-
-第三層，`qemu-platform-demo` 把 driver 放進一個 embedded platform。它展示 Linux kernel 如何透過 Device Tree 找到硬體，如何呼叫 platform driver 的 `probe()`，以及如何在 initramfs 中完成最小系統啟動與驗證。
-
-可以用以下 trace 串起來：
+`print_results()` 會輸出：
 
 ```text
-User command
-  -> fwsh parser
-  -> fwsh executor
-  -> Linux syscall
-  -> VFS
-  -> chardev file_operations
-  -> kernel buffer / procfs / sysfs / ioctl
-
-QEMU boot
-  -> ARM64 kernel Image
-  -> DTB with myled node
-  -> platform device creation
-  -> myled platform_driver probe
-  -> sysfs attributes
-  -> initramfs test script
+BENCHMARK <label> AWT=<...> ATT=<...> ART=<...>
 ```
 
-## 實作細節
+這不是裝飾字串，而是 machine-readable interface。  
+`scripts/04_benchmark.sh` 會抓這些行，再轉成 `results/benchmark.csv`。
 
-### 錯誤處理與資源回收
+也就是：
 
-Kernel module 的 init path 特別需要嚴格的 error unwinding。`chardev_init()` 使用 `goto err_*` 逐層釋放資源，這是 Linux kernel 常見風格。原因是 kernel 沒有 User Space 那種自動 process teardown 保護；若 module init 失敗但沒有釋放 major number、cdev、class 或 buffer，會污染 kernel 狀態。
-
-`myled_ctrl.c` 使用 `devm_kzalloc()` 與 `devm_ioremap_resource()`，這是 Device Managed Resource（裝置生命週期管理資源）。當 device remove 時，devm 資源會自動釋放，可降低 remove path 漏釋放的風險。
-
-### 同步機制：Mutex、Spinlock、Atomic
-
-`chardev-driver` 使用：
-
-- `struct mutex lock`：保護可睡眠上下文中的 buffer 存取。
-- `atomic_t`：統計 open/read/write 次數。
-
-`qemu-platform-demo` 使用：
-
-- `spinlock_t lock`：保護 register read/write。Register access 通常希望短時間完成，不應睡眠，因此用 spinlock 更符合低階 driver 習慣。
-
-Mutex（互斥鎖）可以睡眠，適合一般 process context。Spinlock（自旋鎖）不可睡眠，適合短 critical section。Atomic（原子操作）適合簡單計數，避免為了加一就上鎖。
-
-### User-kernel 資料交換
-
-`chardev-driver` 中有兩種典型資料交換：
-
-- `copy_from_user()`：User Space 到 Kernel Space。
-- `copy_to_user()`：Kernel Space 到 User Space。
-
-這兩者都是 Linux driver 的基本功。不能直接 dereference user pointer，因為 user pointer 可能無效、可能跨頁、可能造成 page fault，也可能是惡意傳入的地址。
-
-### sysfs 與 procfs 的分工
-
-`procfs` 適合輸出一段狀態報告，例如 `/proc/chardev_info`。它可以一次顯示 buffer 長度、read-only 狀態、計數器與內容。
-
-`sysfs` 適合穩定、單一、可腳本化的屬性。例如：
-
-```bash
-echo 1 > read_only
-cat buf_len
-cat stats
+```text
+scheduler.c
+  -> BENCHMARK line
+  -> shell script parser
+  -> CSV
+  -> benchmark report
 ```
 
-在 `myled_ctrl` 中，`brightness`、`color`、`blink`、`enable` 都很適合 sysfs，因為每個屬性都有明確的單一語意。
+這是一條完整的 observability data pipeline。
 
-## 限制與可改進方向
+---
 
-### fwsh
+## 5.6 `linux-ipc-benchmark`：把 IPC 路徑成本直接攤開來看
 
-目前 parser 是自行實作的簡化 Shell grammar，適合展示核心概念，但不是完整 POSIX shell。可改進方向：
+### 5.6.1 這個專案不是呼叫現成 POSIX IPC API 而已
 
-- 支援 environment variable expansion，例如 `$HOME`。
-- 支援 command substitution，例如 `$(cmd)`。
-- 支援更完整 quote / escape 規則。
-- 加入 job control，例如 `fg`、`bg`、process group、terminal control。
-- 對 parser 加入單元測試，測試 pipeline、quote、redirection、background 組合。
+它是自己寫兩個 kernel module：
 
-### chardev-driver
+- `mq_module.ko`
+- `shm_module.ko`
 
-目前 driver 使用單一全域 buffer，適合 demo，但若要更接近 production driver，可改進：
+分別代表：
 
-- 支援多個 minor device，每個 device 有獨立 private data。
-- 在 `open()` 中設定 `filp->private_data`，避免所有 file operation 都依賴全域 `drv`。
-- 對 `read_only` 存取也加上同步保護，避免競態。
-- 對 read/write partial copy 行為做更完整錯誤處理。
-- 增加 poll/select 或 blocking read，使它更像真實資料流裝置。
+- Message Queue 路徑
+- Shared Memory 路徑
 
-### qemu-platform-demo
+### 5.6.2 為什麼這個對照有價值
 
-目前 `myled_ctrl` 的 simulated mode 很適合 QEMU demo，但它不是完整硬體模型。可改進方向：
+這個專案最聰明的地方不是「benchmark 了兩種 IPC」，而是把對照拆成三條路徑：
 
-- 在 QEMU 中實作一個真正 MMIO device model，讓 `readl()` / `writel()` 對應到 QEMU 裝置。
-- 使用 Device Tree binding 文件描述 `myvendor,myled-v1` 的屬性格式。
-- 增加 KUnit 或 shell-based regression test。
-- 將 `brightness`、`color` 等介面改接 Linux LED subsystem，讓它符合 kernel 既有框架。
-- 補上 runtime PM 的實際 usage count 與 autosuspend 流程。
+1. MQ syscall path
+2. SHM syscall path
+3. SHM `mmap()` zero-copy path
 
-## 結論
+這樣就能把問題拆開：
 
-本專案涵蓋 Linux 系統軟體從 User Space 到 Kernel Space，再到 ARM64 embedded platform bring-up 的完整學習線。`fwsh` 展示 process、file descriptor、pipeline 與 signal 的基礎；`chardev-driver` 展示 VFS 如何把 `/dev` 操作接到 kernel driver；`qemu-platform-demo` 展示 Device Tree 如何描述硬體，以及 platform driver 如何在 QEMU ARM64 環境中被載入、probe、建立 sysfs 介面並被測試。
+- queue 機制差異
+- copy 次數差異
+- syscall 次數差異
+
+### 5.6.3 `mq_module.c` 的教學重點
+
+`mq_module.c` 以 `kfifo` 為核心，搭配：
+
+- `mutex`
+- `wait_event_interruptible()`
+- `wake_up_interruptible()`
+
+這條路徑的成本非常清楚：
+
+```text
+write()
+  -> copy_from_user()
+  -> kfifo_in()
+
+read()
+  -> kfifo_out()
+  -> copy_to_user()
+```
+
+也就是每筆訊息穿越 user/kernel 邊界兩次。
+
+### 5.6.4 `shm_module.c` 的教學重點
+
+`shm_module.c` 內部以 `vmalloc()` 配置 ring buffer，並提供兩種用法：
+
+- syscall path：仍用 `write()` / `read()`，因此仍有 copy
+- `mmap()` path：把同一份頁面映射到 userspace，之後直接讀寫共享區
+
+`mmap()` 實作時，它逐頁呼叫：
+
+- `vmalloc_to_pfn()`
+- `remap_pfn_range()`
+
+這是因為 `vmalloc()` 出來的頁面在虛擬位址上連續，但在實體位址上不保證連續。
+
+### 5.6.5 這個專案為何也很適合拿來談 trace
+
+它不是完整 tracing framework，但它有相當清楚的觀測面：
+
+- `/proc/mq_stats`
+- `/proc/shm_stats`
+- kernel-side average latency counters
+- userspace producer/consumer/wall-clock benchmark
+
+也就是它能同時觀察：
+
+- queue 有沒有動
+- latency 有沒有累積
+- throughput 有沒有差
+
+---
+
+## 6. 跨專案技術深入探討
+
+## 6.1 VFS（Virtual File System）為什麼是 driver 的入口
+
+Linux 的強大之處之一，是把很多資源都抽象成檔案。  
+因此：
+
+- 一個 shell 會用 `open/read/write`
+- 一個字元裝置 driver 也會透過 `open/read/write`
+- `/proc` 與 `/sys` 雖然不是實體磁碟檔案，也走檔案語意
+
+`chardev-driver`、`isr_dma_demo`、`linux-ipc-benchmark` 都是靠這套抽象讓 userspace 跟 kernel 溝通。
+
+這樣的優點是：
+
+1. userspace 介面統一
+2. 工具相容性高
+3. 除錯容易
+
+例如 `cat /proc/...`、`echo 1 > /sys/...` 之所以成立，就是因為 VFS 幫你把不同背後機制統一了。
+
+## 6.2 `procfs`、`sysfs`、`ioctl` 要怎麼分工
+
+這三者常被混用，但其實角色應該分清楚。
+
+### `procfs`
+
+適合：
+
+- 統計
+- 調試資訊
+- runtime 狀態快照
+
+本 repo 例子：
+
+- `/proc/chardev_info`
+- `/proc/isr_dma_stats`
+- `/proc/mq_stats`
+- `/proc/shm_stats`
+
+### `sysfs`
+
+適合：
+
+- 裝置屬性
+- 單一欄位式控制
+- 自動化腳本容易存取的設定點
+
+本 repo 例子：
+
+- `chardev` 的 `read_only`
+- `myled` 的 `enable`、`brightness`、`color`
+
+### `ioctl`
+
+適合：
+
+- 不容易用純文字欄位表達的控制命令
+- 有結構化參數或命令碼的操作
+
+本 repo 例子：
+
+- `chardev` reset / get length / set read-only
+- `isr_dma` reset stats / query slot size
+
+## 6.3 同步機制選擇不是隨便的
+
+這個 repository 很適合拿來比較 Linux 常見同步原語。
+
+### `mutex`
+
+出現在：
+
+- `chardev-driver`
+- `mq_module.c`
+
+適合原因：
+
+- process context
+- 可以睡眠
+- 臨界區內容不是極短的硬中斷級路徑
+
+### `spinlock`
+
+出現在：
+
+- `isr_dma_demo` 的 naive path
+- `shm_module.c` 的 syscall ring path
+- `myled_ctrl.c` 的 register access
+
+適合原因：
+
+- 臨界區短
+- 不可睡眠
+- 有些情境接近 IRQ / MMIO 共享保護
+
+### wait queue
+
+出現在：
+
+- `mq_module.c`
+
+適合原因：
+
+- queue full / empty 時不該 busy loop 浪費 CPU
+- producer / consumer 關係很明確
+
+### `atomic_t` / `atomic64_t`
+
+出現在：
+
+- `isr_dma_demo`
+- `linux-ipc-benchmark`
+- `chardev-driver` 的 counters
+
+適合原因：
+
+- 簡單計數
+- head/tail 之類輕量欄位
+- 不想為了單純 counter 引入整把鎖
+
+## 6.4 Ring Buffer（環形緩衝區）為什麼到處出現
+
+在這個 repository 裡，ring buffer 不是偶然，而是核心主題之一。
+
+出現位置：
+
+- `isr_dma_demo`
+- `linux-ipc-benchmark/shm_module.c`
+- `mq_module.c` 內部的 `kfifo`
+
+原因很簡單：  
+它非常適合串流資料或 producer-consumer 模型。
+
+基本規則：
+
+- Empty：`head == tail`
+- Full：`next(head) == tail`
+
+這種結構的好處是：
+
+- 固定容量
+- O(1) push / pop
+- 不需要搬移整塊資料
+
+但真正困難的地方不在數學，而在：
+
+- 多執行實體同步
+- overflow policy
+- memory ordering
+
+## 6.5 Memory Barrier（記憶體屏障）不能只背名字
+
+這個 repo 裡，`isr_dma_demo` 與 `linux-ipc-benchmark` 都讓 memory ordering 問題變得很具體。
+
+典型原則是：
+
+1. 先把 payload 寫完。
+2. 再更新 `head`。
+3. consumer 先看到新的 `head` 時，必須保證 payload 已經可見。
+
+因此你會看到：
+
+- `smp_store_release()`
+- `smp_wmb()`
+- `smp_rmb()`
+- `__sync_synchronize()`
+
+它們不是為了炫技，而是為了避免出現這種錯誤：
+
+> consumer 已看到 head 前進，但該 slot 的資料其實還沒完整寫好。
+
+這種 bug 最難抓，因為它通常不是每次都出現，而且常只在特定 CPU、特定負載下出現。
+
+## 6.6 `mmap()` 與 zero-copy 為什麼重要
+
+`mmap()` 的核心不是「把檔案映射進來很方便」，而是：
+
+- 一次建立映射
+- 之後避免每筆資料都進入 kernel
+- 避免每筆資料都做 `copy_to_user()` / `copy_from_user()`
+
+本 repo 的兩個代表：
+
+- `isr_dma_demo`
+- `linux-ipc-benchmark`
+
+尤其 `linux-ipc-benchmark` 的設計很好，因為它把三種路徑排在一起比較：
+
+1. MQ syscall
+2. SHM syscall
+3. SHM `mmap`
+
+這樣就很容易看出真正的差異來自哪裡。
+
+## 6.7 Device Tree 與 Platform Driver 是 embedded Linux 基本功
+
+在 MCU 世界，很多設定可能直接寫死。  
+但在 Linux/SoC 世界，driver 不應硬寫板子資訊，而是透過 Device Tree 取得：
+
+- base address
+- IRQ
+- compatible
+- property
+
+這樣 driver 才能保持可攜與可重用。
+
+`qemu-platform-demo` 把這件事做得很清楚：
+
+- DTS fragment 描述硬體
+- driver 用 `of_match_table` 配對
+- `probe()` 再去取資源與初始化
+
+這就是 Linux platform driver 的標準工作流。
+
+---
+
+## 7. `Trace` 專章：這個 repository 最值得細講的能力
+
+## 7.1 先定義：這裡說的 `Trace` 是什麼
+
+很多人一看到 `Trace`，會先想到：
+
+- `ftrace`
+- tracepoint
+- `perf`
+- `eBPF`
+- LTTng
+
+這些都是正規、成熟、框架化的 tracing 系統。  
+但本 repository 大多數專案**沒有直接實作這些框架**。
+
+因此本報告必須用精確語言：
+
+> 這個 repository 的 trace 能力，主要是自行設計的 observability surface，以及少量的 execution trace 結構，而不是完整 kernel tracing subsystem。
+
+換句話說，這裡的 `Trace` 可以分成五種層次。
+
+## 7.2 第一層：Lifecycle Trace（生命週期追蹤）
+
+實作方式：
+
+- `pr_info()`
+- `pr_warn()`
+- `dev_info()`
+- `dev_warn()`
+- `dmesg`
+
+出現專案：
+
+- `chardev-driver`
+- `qemu-platform-demo`
+- `isr_dma_demo`
+- `linux-ipc-benchmark`
+
+它回答的問題是：
+
+- 模組有沒有載入成功
+- `probe()` 有沒有被呼叫
+- timer 有沒有啟動
+- `mmap()` 有沒有成功
+- remove / unload 有沒有走完
+
+這類 trace 不會記每一筆資料，但它提供**時間線骨架**。
+
+### 例子
+
+`isr_dma_demo` 會在以下節點印訊息：
+
+- module loading
+- timer started
+- timer stopped
+- reset
+- `mmap` success
+- module unloaded
+
+這使得你即使不看 source，也能先從 `dmesg` 判斷「流程到底走到哪」。
+
+## 7.3 第二層：State Trace（狀態追蹤）
+
+實作方式：
+
+- `proc_create()`
+- `single_open()`
+- `seq_read`
+- `seq_printf()`
+
+出現專案：
+
+- `chardev-driver`
+- `isr_dma_demo`
+- `linux-ipc-benchmark`
+
+這一層的特色是：  
+它不是只記事件，而是把**當下狀態**穩定輸出。
+
+### 最典型的例子：`/proc/isr_dma_stats`
+
+它輸出：
+
+- `isr_count`
+- `drop_count`
+- `ring_head`
+- `ring_tail`
+- `isr_dma_avg_ns`
+- `naive_avg_ns`
+
+這些欄位不是擺好看的。它們分別回答：
+
+- producer 有沒有真的跑
+- consumer 跟不跟得上
+- ring buffer 現在是不是滿了
+- 兩種核心路徑的平均成本差多少
+
+### `seq_file` 為什麼值得學
+
+自己手刻 `/proc` read handler 容易踩到：
+
+- partial read
+- offset handling
+- repeated read
+
+`seq_file` 把這些底層細節處理掉，讓開發者專注在「輸出什麼狀態」。
+
+## 7.4 第三層：Data Trace（資料追蹤）
+
+實作方式：
+
+- `read()` 取出資料
+- hexdump 顯示 payload
+- ring slot 內容驗證
+
+這一層最容易被忽略，但其實非常重要。
+
+因為只有 counter，你只知道「資料數量」；  
+看得到 payload，你才知道「資料本身正不正確」。
+
+### 例子：`isr_dma_demo`
+
+slot 的格式是：
+
+- 8 bytes timestamp
+- 8 bytes counter
+- 48 bytes pattern
+
+用 `hexdump -C` 看資料時，可以確認：
+
+1. slot 邊界正確
+2. timestamp 真的有更新
+3. counter 真的有成長
+4. payload 沒被破壞
+
+這種 trace 對 driver bring-up 非常重要，因為許多 bug 不是「沒有資料」，而是「資料結構錯位」或「欄位值異常」。
+
+## 7.5 第四層：Execution Trace（執行軌跡）
+
+這一層在 `cpu-scheduling-qemu` 最明顯。
+
+它不是觀察 kernel module，而是觀察演算法執行順序。
+
+實作方式：
+
+- `GanttSlot`
+- `gantt_push()`
+- `print_gantt()`
+
+### 為什麼這算 trace
+
+因為它保留了：
+
+- 誰先執行
+- 執行多久
+- 何時切換
+- 哪些片段被 preempt
+
+### `gantt_push()` 為什麼關鍵
+
+這個函式同時扮演：
+
+- event append
+- trace compression
+
+如果沒有合併連續 PID，你會得到大量碎片；  
+有合併後，trace 既保留真實執行順序，又能被人讀懂。
+
+這種做法在真正系統裡也很常見：  
+原始事件流可能很碎，但展示層會做壓縮與歸併。
+
+## 7.6 第五層：Performance Trace（效能追蹤）
+
+實作方式：
+
+- `ktime_get()`
+- `clock_gettime(CLOCK_MONOTONIC)`
+- atomic counters
+- structured benchmark line / key-value output / CSV
+
+出現專案：
+
+- `isr_dma_demo`
+- `cpu-scheduling-qemu`
+- `linux-ipc-benchmark`
+
+這一層回答的問題是：
+
+- 哪條路徑快
+- 快多少
+- 成本主要在 kernel 還是 userspace
+
+### 例子 1：`isr_dma_demo`
+
+kernel 內部用 `ktime_get()` 量：
+
+- `isr_produce()` 平均成本
+- `naive_produce()` 平均成本
+
+再透過 `/proc` 導出。
+
+### 例子 2：`cpu-scheduling-qemu`
+
+`BENCHMARK ...` 行輸出：
+
+- `AWT`
+- `ATT`
+- `ART`
+
+shell script 再把它轉成 CSV。  
+這就是典型的 structured telemetry。
+
+### 例子 3：`linux-ipc-benchmark`
+
+同時量：
+
+- producer thread elapsed time
+- consumer thread elapsed time
+- wall-clock throughput
+- kernel-side average latency
+
+這使得你不只知道「結果快」，還知道「快在哪一層」。
+
+---
+
+## 8. `Trace` 是如何被實作出來的：三個代表案例
+
+## 8.1 案例一：`isr_dma_demo` 的四層 trace 組合
+
+這個專案可以說是本 repository 裡最完整的 trace 教學範例。
+
+### 第一步：事件來源建立
+
+`hrtimer` 每 500 us 觸發一次 callback。  
+這不是實體 IRQ，但它在教學上扮演 ISR-like producer。
+
+### 第二步：資料進入 ring buffer
+
+`isr_produce()` 會：
+
+1. 讀 `head` / `tail`
+2. 檢查是否 full
+3. 寫入 timestamp 與 counter
+4. `smp_store_release()` 更新 `head`
+
+這一步把**事件**變成**資料**。
+
+### 第三步：狀態被統計
+
+driver 同步維護：
+
+- `isr_count`
+- `drop_count`
+- benchmark counters
+
+這一步把資料路徑轉成可量化 state。
+
+### 第四步：狀態被匯出
+
+`/proc/isr_dma_stats` 透過 `seq_printf()` 輸出欄位。
+
+這一步把 kernel 內部狀態變成 userspace 可觀察介面。
+
+### 第五步：資料內容被驗證
+
+userspace 可 `read()` 一個 slot，再用 hexdump 檢查 payload。
+
+這一步把「有資料」進一步提升成「資料內容也對」。
+
+### 第六步：效能結果被記錄
+
+benchmark 腳本與 userspace consumer 會把結果寫成結果檔。
+
+這一步把 trace 從人眼檢查提升成可持續比較的紀錄。
+
+### 為什麼這很重要
+
+很多系統只有 log；  
+有些只有 counter；  
+少數才會連 payload 與 benchmark 都留下。
+
+`isr_dma_demo` 的價值就在於它把：
+
+- lifecycle
+- state
+- data
+- performance
+
+四層 trace 一次串齊。
+
+## 8.2 案例二：`cpu-scheduling-qemu` 的 execution trace
+
+這個專案沒有 kernel module，卻非常適合拿來教 trace 的另一個面向：  
+**不是觀察裝置，而是觀察決策過程。**
+
+### 核心結構
+
+- `Process`
+- `GanttSlot`
+- `gantt[]`
+
+### trace 產生點
+
+- FCFS / SJF / Priority：每選中一個 process，就記一段區間
+- SRTF：每個 tick 都可能記一段
+- RR：每個 quantum 記一段
+
+### 展示層
+
+`print_gantt()` 把區段轉成文字時間線。  
+這讓人可以在沒有圖形化工具的情況下，直接看懂排程行為。
+
+### 結構化輸出層
+
+`BENCHMARK` 行再把結果轉成 scripts 可解析格式。
+
+所以它的 trace 架構可以概括成：
+
+```text
+algorithm step
+  -> gantt slot
+  -> textual timeline
+  -> BENCHMARK structured line
+  -> CSV
+```
+
+這種設計很像 firmware 世界常見的：
+
+- event buffer
+- debug dump
+- CI telemetry
+
+## 8.3 案例三：`linux-ipc-benchmark` 的機制對照型 trace
+
+這個專案的 trace 重點不是完整重建每筆訊息旅程，而是建立**足以比較機制成本**的觀測面。
+
+### MQ module
+
+用：
+
+- `atomic64_t st_enq`
+- `atomic64_t st_deq`
+- `atomic64_t st_lat_ns_total`
+
+再透過 `/proc/mq_stats` 導出。
+
+### SHM module
+
+同樣用：
+
+- write / read count
+- average latency
+- ring used / free slots
+
+再透過 `/proc/shm_stats` 導出。
+
+### userspace benchmark
+
+`benchmark.c` 同步量：
+
+- producer thread 時間
+- consumer thread 時間
+- wall 時間
+- throughput
+
+這種 trace 雖然不是每筆 event log，但它足夠回答最重要的工程問題：
+
+- 是 queue 機制慢，還是 copy 慢
+- 是 syscall 成本高，還是同步成本高
+- `mmap` 之後吞吐量是否明顯提升
+
+---
+
+## 9. 從這些專案抽出的工程原則
+
+## 9.1 Trace 不等於一堆 log
+
+這是本報告最重要的觀念之一。
+
+真正有價值的 trace，至少要能回答其中幾個問題：
+
+1. 事件發生了沒有
+2. 當下狀態是什麼
+3. 資料內容正不正確
+4. 執行順序是什麼
+5. 哪條路徑成本更高
+
+只會印 `printf("here\\n")` 不算完整 trace 設計。
+
+## 9.2 好的觀測面要分層
+
+本 repository 多個專案共同證明一件事：
+
+- 只有 lifecycle log，不夠
+- 只有 counter，不夠
+- 只有 payload dump，不夠
+- 只有 benchmark summary，也不夠
+
+至少要把不同層次分清楚，才能真正 debug。
+
+## 9.3 好的 benchmark 需要結構化輸出
+
+`cpu-scheduling-qemu` 的 `BENCHMARK` 行與 `linux-ipc-benchmark` 的 summary，都反映同一個原則：
+
+> 人類可讀輸出很重要，但機器可解析輸出同樣重要。
+
+因為只要結果能被穩定解析，就能：
+
+- 自動彙整
+- 轉 CSV
+- 做多次比較
+- 接 CI
+
+## 9.4 Honest reporting 比空泛宣稱更重要
+
+這個 repository 有幾個地方特別值得肯定，因為它沒有模糊帶過限制：
+
+- `isr_dma_demo` 明確說出目前 `mmap()` benchmark path 尚未完成
+- `cpu-scheduling-qemu` 明確說出它是 simulator，不是真實 kernel scheduler trace
+- `qemu-platform-demo` 的 simulated mode 明確標示 fallback 行為
+
+技術報告最怕的不是功能不完整，而是把未完成狀態包裝成已完成。  
+這個 repository 的整體方向是誠實的，這是優點。
+
+---
+
+## 10. 建議閱讀順序
+
+如果是第一次讀這個 repository，建議順序如下：
+
+1. `fwsh`
+2. `chardev-driver`
+3. `linux-ipc-benchmark`
+4. `isr_dma_demo`
+5. `qemu-platform-demo`
+6. `cpu-scheduling-qemu`
+
+原因：
+
+- 前兩個先建立 user/kernel 介面基本功
+- `linux-ipc-benchmark` 與 `isr_dma_demo` 進入共享記憶體、ring buffer、trace
+- `qemu-platform-demo` 進入 embedded Linux bring-up
+- `cpu-scheduling-qemu` 最後回頭看 execution trace 與 structured observability，理解會更完整
+
+---
+
+## 11. 結論
+
+若用工程能力來總結這個 repository，它展示的不是單一 API 熟悉度，而是以下幾項更重要的能力：
+
+1. 能從 user space 與 POSIX 基礎出發，掌握 process、FD、pipeline 與 command architecture。
+2. 能進入 Linux kernel module，實作 `cdev`、`procfs`、`sysfs`、`ioctl` 與同步機制。
+3. 能處理 embedded Linux bring-up 的 Device Tree、platform driver、initramfs 與 QEMU workflow。
+4. 能設計共享記憶體、ring buffer、`mmap`、zero-copy 與 benchmark 對照路徑。
+5. 能把 `Trace` 做成多層可觀測面，而不是只停留在零散 log。
+
+若只挑一個最值得深入研究的主題，那就是：
+
+> `Trace` 在這個 repository 中不是附屬品，而是設計核心。它貫穿了 driver bring-up、資料路徑驗證、排程模擬、IPC 比較與 benchmark 自動化。
+
+這也是這份作品集最有技術辨識度的地方。

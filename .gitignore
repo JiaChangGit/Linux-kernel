@@ -361,3 +361,5 @@ qemu-platform-demo/tools/busybox-aarch64
 .build_cache/
 __pycache__/
 .DS_Store
+
+cpu-scheduling-qemu/vm/

@@ -206,7 +206,7 @@ preventing:
 
 ---
 
-# fwsh — 韌體工程師迷你 Shell
+# fwsh — 韌體工程迷你 Shell
 
 > 一個以韌體工程師視角設計的迷你 Shell，展示進階 C 系統程式設計能力。
 
@@ -242,7 +242,7 @@ preventing:
 
 ---
 
-## 韌體工程師專屬工具
+## 韌體工具
 
 ### `hexdump`
 
