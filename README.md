@@ -1,191 +1,81 @@
-# Linux Kernel Portfolio Projects
+# Linux Kernel & Firmware Engineering Portfolio
 
-This repository is a curated portfolio of three Linux system software projects, designed to demonstrate practical engineering ability across user space, kernel space, and embedded platform bring-up.
+[![Kernel Version](https://img.shields.io/badge/Kernel-5.15%2F6.8-blue.svg)](https://kernel.org)
+[![Platform](https://img.shields.io/badge/Platform-Ubuntu%2022.04%2F24.04-orange.svg)](https://ubuntu.com)
+[![License](https://img.shields.io/badge/License-GPL--2.0-green.svg)](LICENSE)
 
-It is organized as a progression:
+本儲存庫整合了多個深入 Linux 核心開發、韌體工程與系統編程的實作專案。涵蓋範圍從基礎的字元驅動程式、作業系統排程演算法模擬，到高效能的行程間通訊 (IPC) 分析以及 ARM64 平台硬體點亮 (Bring-up) 流程。
 
-- `fwsh`: user-space shell and process control
-- `chardev-driver`: Linux kernel character device driver development
-- `qemu-platform-demo`: ARM64 embedded Linux platform-driver workflow in QEMU
-
-These projects are intended to show hands-on experience with:
-
-- C system programming
-- POSIX process and signal handling
-- Linux kernel module development
-- `procfs`, `sysfs`, and `ioctl` interfaces
-- cross-compilation for ARM64
-- Device Tree integration
-- initramfs construction
-- QEMU-based platform validation
-
-## Key Skills
-
-`C` `Linux` `Linux Kernel` `Kernel Module` `Character Device Driver` `POSIX` `fork/exec` `pipe` `signal`
-`procfs` `sysfs` `ioctl` `Device Tree` `ARM64` `Cross Compilation` `QEMU` `BusyBox` `initramfs` `Makefile`
-
-## Portfolio Overview
-
-| Project | Domain | What It Demonstrates | Entry |
-|---|---|---|---|
-| `fwsh` | User-space systems programming | `fork/exec`, pipelines, redirection, built-ins, signal handling, memory discipline | [fwsh/README_fwsh.md](fwsh/README_fwsh.md) |
-| `chardev-driver` | Linux kernel module development | character device registration, userspace-kernel interface design, `procfs`, `sysfs`, `ioctl` | [chardev-driver/README_char.md](chardev-driver/README_char.md) |
-| `qemu-platform-demo` | Embedded Linux / ARM64 | kernel build flow, DTB patching, out-of-tree driver integration, initramfs, QEMU boot and verification | [qemu-platform-demo/README_qemu.md](qemu-platform-demo/README_qemu.md) |
-
-- `fwsh` shows command parsing, process creation, file descriptor handling, and interactive shell behavior.
-- `chardev-driver` moves into kernel-space development and exposes a driver through multiple Linux interfaces.
-- `qemu-platform-demo` extends the work into a fuller embedded workflow, including toolchain setup, kernel build, driver deployment, and virtual platform validation.
-
-Together, they represent the ability to move across software layers and debug Linux systems from application level down to kernel integration.
-
-## Recommended Test Platform
-
-The projects are most suitable for the following host environment:
-
-- OS: Ubuntu 22.04 LTS or Ubuntu 24.04 LTS
-- Architecture: `x86_64` Linux host
-- Compiler: GCC with C11 support
-- Build tools: `make`, `git`, `wget`
-- Privileges: `sudo` access for package install, module loading, and selected test steps
-
-Recommended project-specific platform notes:
-
-| Project | Recommended Host | Notes |
-|---|---|---|
-| `fwsh` | Ubuntu 22.04 / 24.04 | Best for native build and terminal interaction |
-| `chardev-driver` | Ubuntu 22.04 on bare metal or VM | Requires matching `linux-headers-$(uname -r)` for the running kernel |
-| `qemu-platform-demo` | Ubuntu 22.04 / 24.04 with enough disk and CPU | Cross-builds Linux `6.6.30` for `ARM64` and runs it in QEMU |
-
-## System Requirements
-
-| Project | Required Tools / Packages | Notes |
-|---|---|---|
-| `fwsh` | `gcc`, `make`, `libreadline-dev` | Native C11 user-space program |
-| `chardev-driver` | `build-essential`, `linux-headers-$(uname -r)`, `kmod`, `gcc`, `make` | Module insertion and device-node access require `sudo` |
-| `qemu-platform-demo` | `gcc-aarch64-linux-gnu`, `g++-aarch64-linux-gnu`, `qemu-system-arm`, `device-tree-compiler`, `libfdt-dev`, `busybox-static`, `cpio`, `bc`, `bison`, `flex`, `libssl-dev`, `libelf-dev`, `make`, `git`, `wget` | Uses `ARCH=arm64` and `CROSS_COMPILE=aarch64-linux-gnu-` |
-
-Additional environment notes:
-
-- `chardev-driver` depends on `/lib/modules/$(uname -r)/build` being present.
-- `qemu-platform-demo` downloads and builds Linux kernel `6.6.30`.
-- `qemu-platform-demo` requires a usable ARM64 BusyBox binary when generating `initramfs`.
-
-## Suggested Reading Order
-
-1. `fwsh`
-2. `chardev-driver`
-3. `qemu-platform-demo`
-
-## Repository Layout
-
-```text
-Linux-kernel/
-├── fwsh/
-├── chardev-driver/
-├── qemu-platform-demo/
-├── LICENSE
-└── README.md
-```
-
-## Quick Links
-
-- [fwsh](fwsh/)
-- [chardev-driver](chardev-driver/)
-- [qemu-platform-demo](qemu-platform-demo/)
+這不只是一個程式碼集合，而是一套完整的系統工程實踐紀錄，旨在展示如何解決真實世界中的核心層級挑戰。
 
 ---
 
-# Linux Kernel 求職作品集專案
+## 📂 子專案概覽
 
-這個 repository 是一組整理過的 Linux 系統軟體作品集，目的是展示我在 user space、kernel space，以及 embedded Linux 平台 bring-up 方面的實作能力。
+| 專案名稱 | 技術重點 | 核心價值 |
+| :--- | :--- | :--- |
+| [**chardev-driver**](./chardev-driver/) | VFS, ioctl, procfs, sysfs, Mutex | 實作具備多重管理介面的工業級字元驅動。 |
+| [**cpu-scheduling-qemu**](./cpu-scheduling-qemu/) | C11, QEMU, Cloud-init, Discrete Sim | 在隔離環境中量化分析 CPU 排程演算法效能。 |
+| [**fwsh (Firmware Shell)**](./fwsh/) | fork/exec/pipe, Lexer, CRC-32, MMIO | 建構整合韌體除錯工具的微型互動式 Shell。 |
+| [**linux-ipc-benchmark**](./linux-ipc-benchmark/) | kfifo, mmap, Zero-copy, Memory Barrier | 深度對照 Message Queue 與共享記憶體的效能差異。 |
+| [**qemu-platform-demo**](./qemu-platform-demo/) | Platform Bus, Device Tree, devm, ARM64 | 模擬完整硬體點亮流程與裝置樹動態注入技術。 |
 
-整體設計是有順序的：
+---
 
-- `fwsh`：從使用者空間的 shell 與行程控制開始
-- `chardev-driver`：進入 Linux kernel 字元裝置驅動開發
-- `qemu-platform-demo`：延伸到 ARM64 嵌入式 Linux 平台驅動與 QEMU 驗證流程
+## 🛠️ 全域環境準備
 
-這三個專案共同呈現的能力包含：
+建議使用 **Ubuntu 22.04/24.04 LTS (x86_64)**。請先安裝基礎開發工具組：
 
-- C 系統程式設計
-- POSIX 行程與 signal 處理
-- Linux kernel module 開發
-- `procfs`、`sysfs`、`ioctl` 介面設計
-- ARM64 cross-compilation
-- Device Tree 整合
-- initramfs 建置
-- 使用 QEMU 進行平台驗證
-
-## 核心技能標籤
-
-`C` `Linux` `Linux Kernel` `Kernel Module` `Character Device Driver` `POSIX` `fork/exec` `pipe` `signal`
-`procfs` `sysfs` `ioctl` `Device Tree` `ARM64` `Cross Compilation` `QEMU` `BusyBox` `initramfs` `Makefile`
-
-## 作品集總覽
-
-| 專案 | 領域 | 展示能力 | 入口 |
-|---|---|---|---|
-| `fwsh` | 使用者空間系統程式 | `fork/exec`、pipeline、redirect、built-in commands、signal handling、記憶體管理 | [fwsh/README_fwsh.md](fwsh/README_fwsh.md) |
-| `chardev-driver` | Linux kernel module 開發 | character device 註冊、user-kernel 介面設計、`procfs`、`sysfs`、`ioctl` | [chardev-driver/README_char.md](chardev-driver/README_char.md) |
-| `qemu-platform-demo` | Embedded Linux / ARM64 | kernel 編譯流程、DTB patch、out-of-tree driver 整合、initramfs、QEMU 開機與驗證 | [qemu-platform-demo/README_qemu.md](qemu-platform-demo/README_qemu.md) |
-
-- `fwsh` 展示指令解析、行程建立、file descriptor 控制，以及互動式 shell 行為。
-- `chardev-driver` 進一步進入 kernel-space，透過多種 Linux 介面把驅動功能暴露給 userspace。
-- `qemu-platform-demo` 則把範圍擴大到較完整的 embedded Linux workflow，包含 toolchain、kernel、driver、root filesystem 與虛擬平台驗證。
-
-放在一起看，這組作品能反映我具備跨層處理 Linux 系統問題的能力，從應用層一路往下做到 kernel 整合。
-
-## 建議測試平台
-
-這些專案最適合在以下主機環境中操作：
-
-- 作業系統：Ubuntu 22.04 LTS 或 Ubuntu 24.04 LTS
-- 主機架構：`x86_64` Linux host
-- 編譯器：支援 C11 的 GCC
-- 建置工具：`make`、`git`、`wget`
-- 權限需求：需要 `sudo` 來安裝套件、載入模組，以及執行部分測試步驟
-
-各專案建議平台補充如下：
-
-| 專案 | 建議平台 | 補充說明 |
-|---|---|---|
-| `fwsh` | Ubuntu 22.04 / 24.04 | 適合直接在本機終端機進行 native build 與互動測試 |
-| `chardev-driver` | Ubuntu 22.04 實機或虛擬機 | 需要與目前執行中 kernel 相符的 `linux-headers-$(uname -r)` |
-| `qemu-platform-demo` | Ubuntu 22.04 / 24.04，且具備足夠磁碟與 CPU 資源 | 會 cross-build `ARM64` 的 Linux `6.6.30`，並在 QEMU 中啟動 |
-
-## 系統需求
-
-| 專案 | 需要的工具 / 套件 | 補充說明 |
-|---|---|---|
-| `fwsh` | `gcc`、`make`、`libreadline-dev` | native 的 C11 user-space 程式 |
-| `chardev-driver` | `build-essential`、`linux-headers-$(uname -r)`、`kmod`、`gcc`、`make` | 載入模組與存取 device node 需要 `sudo` |
-| `qemu-platform-demo` | `gcc-aarch64-linux-gnu`、`g++-aarch64-linux-gnu`、`qemu-system-arm`、`device-tree-compiler`、`libfdt-dev`、`busybox-static`、`cpio`、`bc`、`bison`、`flex`、`libssl-dev`、`libelf-dev`、`make`、`git`、`wget` | 使用 `ARCH=arm64` 與 `CROSS_COMPILE=aarch64-linux-gnu-` |
-
-額外環境資訊：
-
-- `chardev-driver` 依賴 `/lib/modules/$(uname -r)/build` 必須存在。
-- `qemu-platform-demo` 會下載並編譯 Linux kernel `6.6.30`。
-- `qemu-platform-demo` 在建立 `initramfs` 時，需要可用的 ARM64 BusyBox 執行檔。
-
-## 建議閱讀順序
-
-1. `fwsh`
-2. `chardev-driver`
-3. `qemu-platform-demo`
-
-## Repository 結構
-
-```text
-Linux-kernel/
-├── fwsh/
-├── chardev-driver/
-├── qemu-platform-demo/
-├── LICENSE
-└── README.md
+```bash
+sudo apt update
+sudo apt install -y build-essential gcc-aarch64-linux-gnu \
+                    qemu-system-x86 qemu-system-arm \
+                    device-tree-compiler kmod bc bison flex \
+                    libssl-dev libelf-dev wget libreadline-dev
 ```
 
-## 快速入口
+---
 
-- [fwsh](fwsh/)
-- [chardev-driver](chardev-driver/)
-- [qemu-platform-demo](qemu-platform-demo/)
+## 🚀 快速上手與導覽
+
+本儲存庫各子專案皆為獨立模組。您可以依據興趣選擇特定專案進行實驗。
+
+### 1. 核心驅動實戰 (chardev-driver)
+學習如何安全地處理核心/使用者空間資料交換，並利用 `/proc` 與 `/sys` 監控驅動狀態。
+- **DEMO**：進入目錄執行 `sudo bash scripts/load.sh`，隨後於另一視窗執行 `sudo dmesg -w` 觀察。
+
+### 2. 系統排程實驗室 (cpu-scheduling-qemu)
+透過自動化腳本建立 QEMU 虛擬環境，一鍵跑完 SRTF、RR 等演算法的基準測試 (Benchmark)。
+- **DEMO**：進入目錄執行 `bash scripts/01_setup_env.sh`，隨後啟動 VM 進行測試。
+
+### 3. 韌體除錯工具 (fwsh)
+體驗專為韌體工程師設計的 Shell，內建 CRC-32 計算與 Hexdump 功能。
+- **DEMO**：進入目錄編譯後執行 `./fwsh`。
+
+### 4. IPC 效能極限測試 (linux-ipc-benchmark)
+實測「零拷貝 (Zero-copy)」技術如何將通訊效率提升 5 倍以上。
+- **DEMO**：進入目錄執行 `sudo bash scripts/01_setup.sh`，隨後執行 `./user/benchmark`。
+
+### 5. ARM64 平台開發 (qemu-platform-demo)
+模擬真實的嵌入式開發，從編譯 ARM64 核心到注入裝置樹片段 (DTS Fragment)。
+- **DEMO**：進入目錄依序執行 `01` 至 `05` 號腳本，進入 QEMU 虛擬系統。
+
+---
+
+## 📜 綜合技術報告
+
+如果您想從宏觀角度了解這些專案背後的系統設計思維（如同步機制選型、記憶體管理策略與 VFS 架構），請參閱：
+👉 [**全專案綜合技術報告 (report.md)**](report.md)
+
+---
+
+## 📌 未來擴充方向
+
+1.  **支援 eBPF 遙測**：導入 `bcc` 或 `bpftrace` 來分析 IPC 與驅動的微觀效能。
+2.  **多核心擴展**：將排程器模擬器擴展至多核心負載平衡 (Load Balancing) 場景。
+3.  **異質通訊**：在 `qemu-platform-demo` 中加入虛擬的 Mailbox 機制，模擬多處理器間通訊。
+
+---
+
+## ⚖️ 授權條款
+本儲存庫所有核心程式碼皆採用 **GPL-2.0** 授權，使用者空間工具則遵循 **MIT** 授權。

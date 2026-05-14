@@ -1,464 +1,126 @@
-# Character Device Driver Demo
+# Linux Character Device Driver: Multi-Interface System Design
 
-## Environment Check
+![Kernel Version](https://img.shields.io/badge/Kernel-5.15%2B-blue.svg)
+![License](https://img.shields.io/badge/License-GPL--2.0-green.svg)
+![Platform](https://img.shields.io/badge/Platform-Ubuntu%2022.04-orange.svg)
 
-```bash
-uname -r
-# Check current Linux kernel version
-# Example: 5.15.0-xxx
+本專案實作了一個功能完備的 Linux 字元裝置驅動程式，不僅涵蓋了基礎的檔案 I/O 操作，更深度整合了核心通訊的三大支柱：**ioctl (帶外控制)**、**procfs (系統監控)** 與 **sysfs (屬性配置)**。
 
-lsb_release -a
-# Confirm Ubuntu 22.04
-```
+這不只是一個 HelloWorld 級別的驅動，它展示了如何在 Linux 核心中安全地管理緩衝區、處理多執行緒並行衝突，以及如何建立一套符合核心規範的監控介面。
 
 ---
 
-# Step 1: Install Required Packages
+## 💡 專案亮點與實作特色
 
+- **多維度互動介面**：同一套驅動支援四種互動方式（VFS, ioctl, proc, sysfs），方便在不同情境下呼叫。
+- **工業級安全性**：嚴格使用 `copy_from_user` 與 `copy_to_user` 進行邊界檢查，並利用 `mutex` 互斥鎖確保資料一致性。
+- **自動化裝置管理**：整合 `udev` 機制，模組載入時會自動動態申請主設備號 (Major Number) 並產生 `/dev/chardev0`，無需手動 `mknod`。
+- **無鎖統計計數**：使用核心原子變數 `atomic_t` 追蹤讀寫次數，兼顧效能與精準度。
+
+---
+
+## 🛠️ 開發環境與前置需求
+
+- **作業系統**：建議使用 Ubuntu 22.04 LTS 或任何 Linux Kernel 5.15 以上版本。
+- **必要工具**：需具備 `gcc`, `make` 以及對應核心版本的 `kernel-headers`。
+
+安裝指令：
 ```bash
 sudo apt update
-
-sudo apt install -y \
-    build-essential \
-    linux-headers-$(uname -r) \
-    kmod \
-    gcc \
-    make
+sudo apt install -y build-essential linux-headers-$(uname -r)
 ```
 
 ---
 
-# Step 2: Build Kernel Module
+## 🚀 建立與部署流程
 
+### 1. 下載並進入目錄
 ```bash
-chmod +x scripts/*.sh
+# 請確保您位於專案的 chardev-driver 目錄下
+cd chardev-driver
+```
 
+### 2. 編譯驅動模組
+```bash
+# 進入驅動原始碼目錄
 cd driver
 make
-
-ls -lh chardev.ko
-# Verify kernel module was generated successfully
+# 成功後會產生 chardev.ko 檔案
 ```
 
-Expected output example:
-
+### 3. 載入驅動
+我們建議使用專用的腳本來載入，因為它會自動處理設備權限：
 ```bash
--rw-r--r-- 1 user user 120K May 10 12:00 chardev.ko
-```
-
----
-
-# Step 3: Load Driver
-
-```bash
+# 回到 chardev-driver 根目錄
 cd ..
-bash scripts/load.sh
+chmod +x scripts/*.sh
+sudo ./scripts/load.sh
 ```
 
 ---
 
-# Step 4: Build Userspace Test Program
+## 🎬 完整驗證與 DEMO 步驟
 
+為了觀察驅動程式在底層的運作情形，建議開啟**兩個終端機視窗**。
+
+### 步驟 A：即時日誌追蹤 (Terminal 1)
+開啟一個新的視窗，執行以下指令以持續監看核心日誌：
 ```bash
-cd userspace
-make
+# 在 Terminal 1 執行
+sudo dmesg -w | grep chardev
 ```
 
----
+### 步驟 B：實機操作演示 (Terminal 2)
+在原始視窗執行以下測試：
 
-# Demo 1: Basic Write / Read
-
+#### 1. 基礎寫入與讀取
 ```bash
-echo "Firmware Engineer" > /dev/chardev0
-# Write data into device
+# 寫入一段測試文字
+echo "Hello Driver" > /dev/chardev0
 
+# 讀取剛才寫入的內容
 cat /dev/chardev0
-# Read data from device
 ```
+*此時 Terminal 1 應會顯示 `write() 13 bytes` 與 `read() 13 bytes` 的紀錄。*
 
-Expected output:
-
+#### 2. 檢視 procfs 即時狀態
 ```bash
-Firmware Engineer
-```
-
----
-
-# Demo 2: procfs Status Monitoring
-
-```bash
+# 查看驅動內部目前的統計數據與緩衝區內容
 cat /proc/chardev_info
 ```
 
-Expected output:
-
+#### 3. sysfs 動態切換唯讀模式
 ```bash
-=== chardev driver status ===
-buf_len : 18
-read_only : 0
-open_count : 2
-read_count : 1
-write_count: 1
-buf_content: Firmware Engineer
-```
-
----
-
-# Demo 3: sysfs Attribute Operations
-
-## Show All sysfs Attributes
-
-```bash
-ls /sys/class/chardev/chardev0/
-```
-
-## Read Buffer Length
-
-```bash
-cat /sys/class/chardev/chardev0/buf_len
-```
-
-## Read Statistics
-
-```bash
-cat /sys/class/chardev/chardev0/stats
-```
-
-## Enable Read-Only Mode via sysfs
-
-```bash
+# 預設為讀寫模式，我們將其改為唯讀 (1)
 echo 1 | sudo tee /sys/class/chardev/chardev0/read_only
+
+# 再次嘗試寫入，此時應會回傳「拒絕存取」
+echo "Try to hack" > /dev/chardev0
+# 預期輸出：-bash: /dev/chardev0: Permission denied
 ```
 
-Try writing again:
-
-```bash
-echo "test" > /dev/chardev0
-```
-
-Expected behavior:
-
-```bash
-Permission denied
-```
-
-## Disable Read-Only Mode
-
-```bash
-echo 0 | sudo tee /sys/class/chardev/chardev0/read_only
-```
-
----
-
-# Demo 4: Run Full ioctl Test Program
-
+#### 4. 執行 ioctl 完整測試程式
+本專案提供了一個 C 語言撰寫的測試程式，專門測試 ioctl 控制碼：
 ```bash
 cd userspace
+make
 sudo ./test_app
 ```
 
 ---
 
-# Demo 5: View Kernel Logs
-
+## 🧹 清理環境
+當您完成測試後，請執行卸載腳本：
 ```bash
-sudo dmesg | grep chardev
-```
-
-Expected output:
-
-```bash
-[chardev] major=240 minor=0
-[chardev] driver loaded successfully
-[chardev] open() called, total opens: 1
-[chardev] write() 18 bytes
-[chardev] read() 18 bytes
-[chardev] ioctl: get_len = 18
-[chardev] ioctl: set_rdonly = 1
-[chardev] write() blocked: read-only mode
+# 回到 chardev-driver 根目錄
+sudo ./scripts/unload.sh
 ```
 
 ---
 
-# Demo 6: Unload Driver
-
-```bash
-cd ..
-bash scripts/unload.sh
-cd userspace
-make clean
-```
-
----
-
-# Project Structure
-
-```text
-chardev-driver/
-├── docs/
-│   ├── ......
-│
-├── driver/
-│   ├── chardev.c
-│   │   # Main driver:
-│   │   # cdev + ioctl + procfs + sysfs
-│   │
-│   ├── chardev.h
-│   │   # Shared header:
-│   │   # ioctl command definitions
-│   │
-│   └── Makefile
-│
-├── userspace/
-│   ├── test_app.c
-│   │   # Userspace test program:
-│   │   # read/write/ioctl tests
-│   │
-│   └── Makefile
-│
-├── scripts/
-│   ├── load.sh
-│   │   # Load kernel module
-│   │   # Create /dev node
-│   │
-│   └── unload.sh
-│       # Remove kernel module
-│       # Clean device node
-│
-└── README_char.md
-```
-
----
-
----
-
-# 字元裝置驅動 Demo
-
-## 環境確認
-
-```bash
-uname -r
-# 確認目前 Linux kernel 版本
-# 例如：5.15.0-xxx
-
-lsb_release -a
-# 確認 Ubuntu 22.04
-```
-
----
-
-# Step 1：安裝編譯環境
-
-```bash
-sudo apt update
-
-sudo apt install -y \
-    build-essential \
-    linux-headers-$(uname -r) \
-    kmod \
-    gcc \
-    make
-```
-
----
-
-# Step 2：編譯 Kernel Module
-
-```bash
-chmod +x scripts/*.sh
-
-cd driver
-make
-
-ls -lh chardev.ko
-# 確認 kernel module 是否成功產生
-```
-
-預期輸出：
-
-```bash
--rw-r--r-- 1 user user 120K May 10 12:00 chardev.ko
-```
-
----
-
-# Step 3：載入 Driver
-
-```bash
-cd ..
-bash scripts/load.sh
-```
-
----
-
-# Step 4：編譯 Userspace 測試程式
-
-```bash
-cd userspace
-make
-```
-
----
-
-# 演示 1：基本 write / read
-
-```bash
-echo "Firmware Engineer" > /dev/chardev0
-# 寫入資料到 device
-
-cat /dev/chardev0
-# 從 device 讀取資料
-```
-
-預期輸出：
-
-```bash
-Firmware Engineer
-```
-
----
-
-# 演示 2：procfs 狀態檢視
-
-```bash
-cat /proc/chardev_info
-```
-
-預期輸出：
-
-```bash
-=== chardev driver status ===
-buf_len : 18
-read_only : 0
-open_count : 2
-read_count : 1
-write_count: 1
-buf_content: Firmware Engineer
-```
-
----
-
-# 演示 3：sysfs 屬性操作
-
-## 查看所有 sysfs 屬性
-
-```bash
-ls /sys/class/chardev/chardev0/
-```
-
-## 讀取 buffer 長度
-
-```bash
-cat /sys/class/chardev/chardev0/buf_len
-```
-
-## 查看統計資訊
-
-```bash
-cat /sys/class/chardev/chardev0/stats
-```
-
-## 透過 sysfs 開啟唯讀模式
-
-```bash
-echo 1 | sudo tee /sys/class/chardev/chardev0/read_only
-```
-
-再次嘗試寫入：
-
-```bash
-echo "test" > /dev/chardev0
-```
-
-預期行為：
-
-```bash
-Permission denied
-```
-
-## 關閉唯讀模式
-
-```bash
-echo 0 | sudo tee /sys/class/chardev/chardev0/read_only
-```
-
----
-
-# 演示 4：執行完整 ioctl 測試程式
-
-```bash
-cd ..
-cd userspace
-sudo ./test_app
-```
-
----
-
-# 演示 5：查看 Kernel Log
-
-```bash
-sudo dmesg | grep chardev
-```
-
-預期輸出：
-
-```bash
-[chardev] major=240 minor=0
-[chardev] driver loaded successfully
-[chardev] open() called, total opens: 1
-[chardev] write() 18 bytes
-[chardev] read() 18 bytes
-[chardev] ioctl: get_len = 18
-[chardev] ioctl: set_rdonly = 1
-[chardev] write() blocked: read-only mode
-```
-
----
-
-# 演示 6：卸載 Driver
-
-```bash
-cd ..
-bash scripts/unload.sh
-cd userspace
-make clean
-```
-
----
-
-# 專案結構
-
-```text
-chardev-driver/
-├── docs/
-│   ├── ......
-│
-├── driver/
-│   ├── chardev.c
-│   │   # 主驅動：
-│   │   # cdev + ioctl + procfs + sysfs
-│   │
-│   ├── chardev.h
-│   │   # 共用 header：
-│   │   # ioctl 命令定義
-│   │
-│   └── Makefile
-│
-├── userspace/
-│   ├── test_app.c
-│   │   # Userspace 測試程式：
-│   │   # read/write/ioctl 測試
-│   │
-│   └── Makefile
-│
-├── scripts/
-│   ├── load.sh
-│   │   # 載入 kernel module
-│   │   # 建立 /dev 節點
-│   │
-│   └── unload.sh
-│       # 卸載 kernel module
-│       # 清除 device node
-│
-└── README_char.md
-```
+## 📌 未來可擴充方向
+
+1. **支援 Poll/Select**：實作非阻塞式 I/O，讓應用程式能使用 `epoll` 監控驅動狀態。
+2. **中斷處理 (Interrupt Handling)**：模擬硬體觸發中斷，並實作 Tasklet 或 Workqueue 來處理後半部 (Bottom Half) 邏輯。
+3. **支援 DMA 傳輸**：針對大數據傳輸場景，實作直接記憶體存取機制，降低 CPU 負荷。
+4. **多設備支援**：修改驅動使其支援多個 Minor Number，能同時管理多個虛擬緩衝區。

@@ -1,514 +1,110 @@
-# CPU Scheduling Algorithm Demo
+# CPU Scheduling Simulator: QEMU-Based Reproducible Environment
 
-在 QEMU 虛擬機器中執行並比較五種 CPU 排程演算法：
+[![Kernel Version](https://img.shields.io/badge/Reproduction-Ubuntu%2024.04-orange.svg)](https://ubuntu.com)
+[![QEMU](https://img.shields.io/badge/Platform-QEMU%20x86__64-blue.svg)](https://www.qemu.org/)
+[![License](https://img.shields.io/badge/License-GPL--2.0-green.svg)](LICENSE)
 
-- `fcfs`
-- `sjf`
-- `srtf`
-- `priority`
-- `rr`
+本專案提供了一個高度可重現的 CPU 排程演算法實驗平台。透過 C 語言實作核心排程邏輯，並利用 **QEMU 虛擬化技術** 與 **Cloud-init 自動化佈署**，讓開發者能在一個完全隔離且乾淨的環境中，精確比較不同排程演算法（如 FCFS, SJF, SRTF, RR 等）的效能表現。
 
-此專案的目的很明確：
+這不僅是一個演算法實作，更是一套完整的系統驗證流水線，從環境建置、自動化測試到數據視覺化彙整，模擬了真實系統開發中的品質驗證流程。
 
-1. 用 C 實作常見的 CPU scheduling policies。
-2. 用固定 workload 比較各演算法的輸出結果。
-3. 用 QEMU + Ubuntu 24.04 建立可重現的執行環境。
-4. 產生可閱讀的 demo 輸出與可解析的 benchmark 數據。
+---
 
-這個專案是「排程模擬器（scheduler simulator）」，不是 Linux kernel scheduler modification。  
-它不會修改 Linux 核心，也不會用 `ftrace`、`perf`、`eBPF` 收集真實核心排程事件。
+## 🎯 專案核心目標
 
-## What This Project Actually Does
+1.  **純 C 實作排程器**：包含 FCFS、SJF、SRTF、Priority 與不同 Time Quantum 的 Round Robin。
+2.  **隔離實驗環境**：使用 QEMU + Ubuntu 24.04 Cloud Image，確保所有主機執行結果一致。
+3.  **自動化測試管線**：一鍵完成 VM 啟動、Workload 載入、效能數據（AWT, ATT, ART）擷取。
+4.  **視覺化軌跡分析**：自動生成純文字 Gantt Chart，直觀觀察搶先（Preemption）與時間片切換。
 
-本專案執行流程如下：
+---
 
-1. `scripts/01_setup_env.sh`
-   下載 Ubuntu 24.04 cloud image，建立 VM 磁碟，產生 cloud-init seed ISO。
-2. `scripts/02_start_vm.sh`
-   啟動 QEMU，等待 SSH 可連線，並確認 VM 內的 scheduler binary 已準備完成。
-3. `scripts/03_demo.sh`
-   在 VM 內執行 demo workload，輸出每個 process 的統計與 Gantt Chart。
-4. `scripts/04_benchmark.sh`
-   在 VM 內執行 benchmark workload，擷取平均指標並輸出 CSV。
-5. `scripts/05_cleanup.sh`
-   關閉 VM 並清除產生的 VM 檔案。
+## 📂 專案架構
 
-## Algorithms Implemented
+```text
+cpu-scheduling-qemu/
+├── src/                # 排程模擬器原始碼與測試負載
+│   ├── scheduler.c     # 核心邏輯 (FCFS, SJF, SRTF, Priority, RR)
+│   └── workload_*.txt  # 預定義的測試案例 (Demo/Benchmark)
+├── scripts/            # 自動化管理腳本 (01-05 依序執行)
+├── results/            # 實驗結果匯出 (CSV, Report, Logs)
+├── vm/                 # QEMU 虛擬機器檔案 (由腳本動態生成)
+└── Makefile            # 流程調度定義
+```
 
-### FCFS
+---
 
-First-Come First-Served。  
-依 arrival time 排序，先到先執行，不可搶先（non-preemptive）。
+## 🛠️ 開發環境準備
 
-### SJF
-
-Shortest Job First。  
-在 CPU 空出來時，從所有已到達且尚未完成的 process 中，選 burst time 最小者執行。此專案實作的是不可搶先版本。
-
-### SRTF
-
-Shortest Remaining Time First。  
-SJF 的可搶先版本。每個時間單位都重新檢查 ready set，選 remaining time 最小者。
-
-### Priority
-
-Priority Scheduling。  
-本專案定義「數字越小，priority 越高」。此版本為不可搶先。
-
-### RR
-
-Round Robin。  
-每個 process 最多執行一個 time quantum，再回到 ready queue 尾端。本專案測試 `Q=1`、`Q=2`、`Q=4`、`Q=8`。
-
-## Key Outputs
-
-### Demo output
-
-`results/demo_output.txt` 包含：
-
-- 每個演算法的 process table
-- 每個 process 的 `Arrival`、`Burst`、`Start`、`Finish`、`Wait`、`TAT`
-- Gantt Chart
-
-### Benchmark output
-
-`results/benchmark.csv` 包含：
-
-- `Algorithm`
-- `AWT`：Average Waiting Time
-- `ATT`：Average Turnaround Time
-- `ART`：Average Response Time
-
-`results/benchmark_report.txt` 會把同一批結果整理成純文字比較表。
-
-## Requirements
-
-Host 環境：
-
-- Ubuntu 24.04 x86_64
-
-腳本會自行檢查並安裝缺少的工具。若要手動安裝，至少需要：
+本專案建議在 **Ubuntu 24.04 (x86_64)** Host 環境下執行。腳本會自動檢查並補足缺失工具，但手動預裝以下套件可確保流程更順暢：
 
 ```bash
 sudo apt update
-sudo apt install -y \
-    qemu-system-x86 \
-    qemu-utils \
-    cloud-image-utils \
-    libguestfs-tools \
-    gcc \
-    wget \
-    sshpass \
-    bc
+sudo apt install -y qemu-system-x86 qemu-utils cloud-image-utils \
+                    libguestfs-tools gcc wget sshpass bc
 ```
 
-說明：
+*註：若您的環境支援 KVM 加速（`/dev/kvm` 可讀寫），VM 執行速度將提升 10 倍以上。*
 
-- `qemu-system-x86_64`：啟動 VM
-- `qemu-img`：建立與轉換磁碟映像
-- `cloud-localds`：建立 cloud-init seed ISO
-- `virt-customize`：由 setup script 檢查依賴
-- `gcc`：在 host 端編譯 `src/scheduler.c`
-- `sshpass`：讓 demo/benchmark script 非互動式登入 VM
-- `bc`：benchmark script 用來比較浮點數
+---
 
-## Important Implementation Notes
+## 🚀 逐步執行教學
 
-這幾點請先看清楚，避免對專案行為有錯誤理解。
-
-### 1. Scheduler binary 是在 host 編譯，不是在 VM 內編譯
-
-`scripts/01_setup_env.sh` 會先在 host 執行：
+### 第一步：建置實驗環境
+此步驟會下載 Ubuntu Cloud Image 並透過 Cloud-init 注入排程器二進位檔。
 
 ```bash
-gcc -O2 -Wall -Wextra -std=c11 -o /tmp/scheduler_host_check src/scheduler.c
-```
-
-之後把：
-
-- `scheduler` binary
-- `scheduler.c`
-- `workload_demo.txt`
-- `workload_bench.txt`
-
-透過 cloud-init 注入 VM。
-
-因此這個專案的 VM 啟動後，scheduler 已經可執行，不需要在 VM 內再次編譯。
-
-### 2. QEMU machine type 不是固定只有 `q35`
-
-`scripts/02_start_vm.sh` 的實際邏輯是：
-
-- 若 `/dev/kvm` 可讀寫：使用 `-machine q35,accel=kvm`
-- 若 KVM 不可用：使用 `-machine pc,accel=tcg`
-
-因此：
-
-- KVM 路徑：`q35`
-- TCG 路徑：`pc`
-
-### 3. Benchmark 沒有模擬真實 context-switch cost
-
-Round Robin 與 SRTF 會產生更多切換，但 `src/scheduler.c` 沒有把 context-switch overhead 額外加進時間模型。  
-因此 benchmark 顯示的是「排程決策造成的等待與完成結果」，不是「真實作業系統中包含 context switch cost 的完整效能」。
-
-## Quick Start
-
-若你已經在此專案根目錄，只需要：
-
-```bash
+# 賦予腳本執行權限
 chmod +x scripts/*.sh
-make all
-```
 
-`make all` 會依序執行：
-
-1. `make setup`
-2. `make start`
-3. `make demo`
-4. `make bench`
-
-若你不想啟動 QEMU，只想直接在 host 測試演算法輸出：
-
-```bash
-make demo-host
-```
-
-這個模式會用 host 端編譯出的 binary，直接執行 `src/workload_demo.txt`。
-
-## Step-by-Step Usage
-
-### 1. Build VM assets
-
-```bash
+# 執行環境建置 (約需 2-5 分鐘，視網路速度而定)
 bash scripts/01_setup_env.sh
 ```
 
-這支腳本會：
-
-1. 檢查依賴
-2. 下載 `noble-server-cloudimg-amd64.img`
-3. 建立 `vm/ubuntu2404.qcow2`
-4. 產生 `vm/seed.iso`
-5. 驗證 `src/scheduler.c` 可編譯
-6. 把 scheduler 與 workload 注入 cloud-init
-
-產生的重要檔案：
-
-- `vm/ubuntu2404-base.img`
-- `vm/ubuntu2404.qcow2`
-- `vm/seed.iso`
-
-### 2. Start the VM
+### 第二步：啟動虛擬機器
+VM 將以 **Daemon 模式** 在背景啟動。
 
 ```bash
 bash scripts/02_start_vm.sh
 ```
+*腳本會持續偵測 SSH 狀態，直到 VM 內部初始化完成。啟動後您可以透過 `ssh -p 2222 scheduler@localhost` 手動登入觀察（密碼：`scheduler123`）。*
 
-這支腳本會：
-
-1. 以背景模式啟動 QEMU
-2. 建立 host `2222 -> guest 22` 的 SSH port forwarding
-3. 等待 SSH 可連線
-4. 確認 `/home/scheduler/scheduler` 存在且可執行
-5. 確認 cloud-init 已完成
-
-成功後可手動登入：
-
-```bash
-ssh -p 2222 scheduler@localhost
-```
-
-登入密碼：
-
-```text
-scheduler123
-```
-
-### 3. Run the demo workload
+### 第三步：執行演算法展示 (Demo)
+此步驟會將 Demo Workload 餵給模擬器，並輸出直觀的甘特圖。
 
 ```bash
 bash scripts/03_demo.sh
 ```
+*結果將儲存於 `results/demo_output.txt`。建議開啟另一個終端機執行 `tail -f results/demo_output.txt` 即時觀察。*
 
-此步驟會執行：
-
-- `fcfs`
-- `sjf`
-- `srtf`
-- `priority`
-- `rr 1`
-- `rr 2`
-- `rr 4`
-- `rr 8`
-
-輸出檔案：
-
-- `results/demo_output.txt`
-
-### 4. Run the benchmark workload
+### 第四步：效能基準測試 (Benchmark)
+針對 12 個 Processes 的複雜場景，自動計算各演算法的平均等待時間與週轉時間。
 
 ```bash
 bash scripts/04_benchmark.sh
 ```
+*完成後請查看 `results/benchmark_report.txt` 取得詳細的對比分析表。*
 
-此步驟會：
-
-1. 在 VM 內執行所有演算法
-2. 從每次執行結果中擷取 `BENCHMARK ...` 行
-3. 解析出 `AWT`、`ATT`、`ART`
-4. 寫入 `results/benchmark.csv`
-5. 生成 `results/benchmark_report.txt`
-
-### 5. Clean up
+### 第五步：環境清理
+結束實驗後，釋放磁碟空間與背景行程。
 
 ```bash
 bash scripts/05_cleanup.sh
 ```
 
-會移除：
+---
 
-- `vm/seed.iso`
-- `vm/user-data`
-- `vm/meta-data`
-- `vm/ubuntu2404.qcow2`
-- `vm/qemu.log`
-- `vm/qemu-serial.log`
+## 📊 關鍵指標定義
 
-若要連 base image 一起移除：
+-   **AWT (Average Waiting Time)**：行程在 Ready Queue 中等待取得 CPU 的平均時間。
+-   **ATT (Average Turnaround Time)**：從行程到達至完全結束的平均生命週期。
+-   **ART (Average Response Time)**：從行程到達至**第一次**取得 CPU 的平均延遲。
 
-```bash
-bash scripts/05_cleanup.sh --full
-```
+---
 
-這會額外刪除：
+## 🔍 未來擴充方向
 
-- `vm/ubuntu2404-base.img`
-
-`results/` 不會被 cleanup script 刪除。
-
-## Input Format
-
-`src/scheduler.c` 的輸入格式固定如下：
-
-```text
-<n>
-<pid> <arrival> <burst> <priority>
-<pid> <arrival> <burst> <priority>
-...
-```
-
-### Example
-
-```text
-6
-1 0 8 3
-2 1 4 1
-3 2 9 4
-4 3 5 2
-5 4 2 5
-6 5 1 3
-```
-
-欄位定義：
-
-- `pid`：Process ID
-- `arrival`：arrival time
-- `burst`：CPU burst time
-- `priority`：priority value，數字越小優先權越高
-
-## Output Format
-
-每次執行會輸出兩類資訊。
-
-### 1. Human-readable table
-
-例如：
-
-```text
-PID    Arrival  Burst   Start    Finish     Wait     TAT
-1      0        8       0        8          0        8
-...
-```
-
-欄位定義：
-
-- `Start`：第一次取得 CPU 的時間
-- `Finish`：完成時間
-- `Wait`：waiting time
-- `TAT`：turnaround time
-
-### 2. Machine-readable benchmark line
-
-例如：
-
-```text
-BENCHMARK FCFS AWT=13.3333 ATT=18.1667 ART=13.3333
-```
-
-這一行是 `scripts/04_benchmark.sh` 解析 benchmark 結果的唯一固定格式。  
-如果你修改 `scheduler.c` 的輸出格式，請保留這一行的結構，否則 benchmark script 會失敗。
-
-## Result Metrics
-
-### AWT
-
-Average Waiting Time。
-
-公式：
-
-```text
-waiting = turnaround - burst
-```
-
-### ATT
-
-Average Turnaround Time。
-
-公式：
-
-```text
-turnaround = finish - arrival
-```
-
-### ART
-
-Average Response Time。
-
-公式：
-
-```text
-response = start - arrival
-```
-
-## Project Structure
-
-```text
-cpu-scheduling-qemu/
-├── docs/
-│   └── schedule_DEMO_*.png
-├── results/
-│   ├── benchmark.csv
-│   ├── benchmark_report.txt
-│   └── demo_output.txt
-├── scripts/
-│   ├── 01_setup_env.sh
-│   ├── 02_start_vm.sh
-│   ├── 03_demo.sh
-│   ├── 04_benchmark.sh
-│   └── 05_cleanup.sh
-├── src/
-│   ├── scheduler.c
-│   ├── workload_bench.txt
-│   └── workload_demo.txt
-├── Makefile
-├── README_schedule.md
-└── report.md
-```
-
-## Design Choices
-
-### Why x86_64
-
-選 `x86_64` 的原因很直接：
-
-- Ubuntu 24.04 cloud image 直接可用
-- `qemu-system-x86_64` 在 Ubuntu 上容易安裝
-- 不需要 ARM cross-toolchain
-
-### Why cloud-init
-
-使用 cloud-init 的原因也很直接：
-
-- 不需要手動安裝 VM
-- 不需要手動登入後再傳檔
-- 每次都能從固定流程重建環境
-
-### Why plain-text workloads
-
-把 workload 放在文字檔而不是寫死在程式裡，有兩個直接好處：
-
-1. 改 workload 不需要改 scheduler code
-2. 同一支 scheduler binary 可以重複拿來測不同 workload
-
-## Known Limits
-
-這份專案的限制如下：
-
-1. 單核心模擬，不支援 multi-core scheduling。
-2. 時間模型是整數 tick，不是連續時間。
-3. 沒有 I/O wait、sleep、wake-up、interrupt-driven state transition。
-4. 沒有模擬真實 context-switch cost。
-5. `priority` 演算法沒有 aging。
-6. 這不是 Linux kernel trace，也不是真實 kernel scheduler benchmark。
-
-## Useful Commands
-
-```bash
-make build
-make demo-host
-make setup
-make start
-make demo
-make bench
-make clean
-make clean-full
-make all
-```
-
-## Expected Files After a Full Run
-
-在 `make all` 成功完成、且尚未執行 cleanup 的情況下，應存在：
-
-```text
-results/demo_output.txt
-results/benchmark.csv
-results/benchmark_report.txt
-vm/ubuntu2404-base.img
-vm/ubuntu2404.qcow2
-vm/seed.iso
-vm/qemu.pid
-vm/qemu.log
-vm/qemu-serial.log
-```
-
-## Troubleshooting
-
-### `sshpass is required`
-
-請安裝：
-
-```bash
-sudo apt install -y sshpass
-```
-
-### `Timed out waiting for SSH`
-
-請檢查：
-
-1. `vm/qemu.log`
-2. `vm/qemu-serial.log`
-3. 主機是否支援 KVM
-4. `2222` port 是否已被占用
-
-### `Scheduler binary not found in VM`
-
-代表 cloud-init 尚未成功完成。請重新檢查：
-
-- `scripts/01_setup_env.sh` 是否成功執行
-- `scripts/02_start_vm.sh` 是否出現 setup failure 訊息
-- `vm/qemu-serial.log` 內容
-
-### `benchmark.csv` 沒有產生內容
-
-請先確認：
-
-1. `results/benchmark_report.txt` 是否有內容
-2. `scheduler.c` 是否仍輸出 `BENCHMARK ...` 行
-3. `scripts/04_benchmark.sh` 中的解析格式是否仍與程式輸出一致
-
-## Summary
-
-如果只看一句話，這個專案做的事情是：
-
-> 用 C 實作 CPU 排程模擬器，用 QEMU 建立可重現環境，用 shell scripts 自動化 demo 與 benchmark，最後輸出可讀的排程結果與可解析的比較數據。
+-   **多核心排程模擬 (Multi-core Scheduling)**：擴充資料結構以支援多個處理單元的任務分配（Load Balancing）。
+-   **加入 Context Switch 開銷**：在模擬模型中計入任務切換造成的 Tick 損耗，使結果更貼近真實 OS。
+-   **老化機制 (Aging)**：針對 Priority Scheduling 實作動態權重調整，解決飢餓（Starvation）問題。
+-   **視覺化 Web Dashboard**：將 CSV 數據對接 Grafana 或 Python 圖表，自動產出效能對比圖形。
