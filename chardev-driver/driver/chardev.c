@@ -327,6 +327,6 @@ module_init(chardev_init);
 module_exit(chardev_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Your Name");
+MODULE_AUTHOR("JIA");
 MODULE_DESCRIPTION("Custom chardev with sysfs and procfs");
 MODULE_VERSION("1.0");

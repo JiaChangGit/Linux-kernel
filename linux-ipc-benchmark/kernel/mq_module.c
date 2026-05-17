@@ -30,7 +30,7 @@
 #include <linux/atomic.h>
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("linux-ipc-benchmark");
+MODULE_AUTHOR("JIA");
 MODULE_DESCRIPTION("IPC demo: Message Queue via kfifo");
 MODULE_VERSION("1.0");
 

@@ -439,7 +439,7 @@ static struct platform_driver myled_driver = {
 
 module_platform_driver(myled_driver);
 
-MODULE_AUTHOR("Your Name <you@example.com>");
+MODULE_AUTHOR("JIA");
 MODULE_DESCRIPTION("Virtual LED Controller Platform Driver (QEMU Demo)");
 MODULE_LICENSE("GPL v2");
 MODULE_VERSION("1.0.0");
