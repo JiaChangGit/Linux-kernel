@@ -1,0 +1,52 @@
+root = true
+
+# ──────────────────────────────────────────────
+# 所有檔案的預設值
+# ──────────────────────────────────────────────
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# ──────────────────────────────────────────────
+# 語言特定覆寫
+# ──────────────────────────────────────────────
+
+# Makefile 必須使用 tab（語法要求）
+[Makefile]
+indent_style = tab
+
+# Python：PEP 8 標準為 4 格縮排
+[*.py]
+indent_size = 4
+
+# Go：gofmt 強制使用 tab
+[*.go]
+indent_style = tab
+
+# Java / Kotlin / Groovy / Scala：慣例為 4 格
+[*.{java,kt,groovy,scala,gradle}]
+indent_size = 4
+
+# C / C++：慣例為 4 格
+[*.{c,cc,cxx,cpp,c++,h,hh,hpp,h++}]
+indent_size = 4
+
+# Shell 腳本：強制 LF，避免在 Unix 環境執行時出錯
+[*.sh]
+end_of_line = lf
+
+# Markdown：行尾兩個空格是合法換行語法，不應裁剪
+[*.{md,markdown,mdwn,mdown,mkd,mkdn}]
+trim_trailing_whitespace = false
+
+# Windows 專案檔案：Visual Studio 要求 CRLF
+[*.{sln,csproj,vbproj,vcxproj,vcproj,props,filters,vcxitems}]
+end_of_line = crlf
+
+# Windows Batch 腳本：必須使用 CRLF
+[*.bat]
+end_of_line = crlf

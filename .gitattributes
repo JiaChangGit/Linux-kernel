@@ -1,292 +1,341 @@
-# 自動把text的斷行做一致化
+# ──────────────────────────────────────────────────────────────────────────────
+# 全域預設：自動偵測文字/二進位，並正規化斷行為 LF
+# ──────────────────────────────────────────────────────────────────────────────
 * text=auto
 
-# 文件類型
-*.markdown text
-*.md text
-*.mdwn text
-*.mdown text
-*.mkd text
-*.mkdn text
-*.mdtxt text
-*.mdtext text
-*.txt text
-AUTHORS text
-CHANGELOG text
-CHANGES text
+# ──────────────────────────────────────────────────────────────────────────────
+# 文件 / 純文字
+# ──────────────────────────────────────────────────────────────────────────────
+*.markdown  text
+*.md        text
+*.mdwn      text
+*.mdown     text
+*.mkd       text
+*.mkdn      text
+*.mdtxt     text
+*.mdtext    text
+*.txt       text
+AUTHORS     text
+CHANGELOG   text
+CHANGES     text
 CONTRIBUTING text
-COPYING text
-copyright text
+COPYING     text
+copyright   text
 *COPYRIGHT* text
-INSTALL text
-license text
-LICENSE text
-NEWS text
-readme text
-*README* text
-TODO text
+INSTALL     text
+license     text
+LICENSE     text
+NEWS        text
+readme      text
+*README*    text
+TODO        text
 
-# 範本類型
-*.dot text
-*.ejs text
-*.haml text
-*.handlebars text
-*.hbs text
-*.hbt text
-*.jade text
-*.latte text
-*.mustache text
-*.njk text
-*.phtml text
-*.tmpl text
-*.tpl text
-*.twig text
+# ──────────────────────────────────────────────────────────────────────────────
+# 範本引擎
+# ──────────────────────────────────────────────────────────────────────────────
+*.ejs         text
+*.haml        text
+*.handlebars  text
+*.hbs         text
+*.hbt         text
+*.jade        text
+*.latte       text
+*.mustache    text
+*.njk         text
+*.phtml       text
+*.tmpl        text
+*.tpl         text
+*.twig        text
 
-# word 類型
-*.doc diff=astextplain
-*.DOC diff=astextplain
-*.docx diff=astextplain
-*.DOCX diff=astextplain
-*.dot diff=astextplain
-*.DOT diff=astextplain
-*.pdf diff=astextplain
-*.PDF diff=astextplain
-*.rtf diff=astextplain
-*.RTF diff=astextplain
+# ──────────────────────────────────────────────────────────────────────────────
+# Microsoft Office / 文書格式
+# （*.dot 為 Word 範本，與上方範本引擎副檔名分開處理）
+# ──────────────────────────────────────────────────────────────────────────────
+*.doc   diff=astextplain
+*.DOC   diff=astextplain
+*.docx  diff=astextplain
+*.DOCX  diff=astextplain
+*.dot   diff=astextplain
+*.DOT   diff=astextplain
+*.rtf   diff=astextplain
+*.RTF   diff=astextplain
 
-# visual studio 專案檔案設定
-*.sln text eol=crlf
-*.csproj text eol=crlf
-*.vbproj text eol=crlf
-*.vcxproj text eol=crlf
-*.vcproj text eol=crlf
-*.dbproj text eol=crlf
-*.fsproj text eol=crlf
-*.lsproj text eol=crlf
-*.wixproj text eol=crlf
-*.modelproj text eol=crlf
-*.sqlproj text eol=crlf
-*.wmaproj text eol=crlf
-*.xproj text eol=crlf
-*.props text eol=crlf
-*.filters text eol=crlf
-*.vcxitems text eol=crlf
+# ──────────────────────────────────────────────────────────────────────────────
+# 原始碼
+# ──────────────────────────────────────────────────────────────────────────────
 
-# binary 類型
-## 圖像
-*.ai binary
-*.bmp binary
-*.eps binary
-*.gif binary
-*.ico binary
-*.jng binary
-*.jp2 binary
-*.jpg binary
-*.jpeg binary
-*.jpx binary
-*.jxr binary
-*.pdf binary
-*.png binary
-*.psb binary
-*.psd binary
-*.svg binary
-*.svgz binary
-*.tif binary
-*.tiff binary
-*.wbmp binary
-*.webp binary
-## 影音
-*.kar binary
-*.m4a binary
-*.mid binary
-*.midi binary
-*.mp3 binary
-*.ogg binary
-*.ra binary
-## 影片
-*.3gpp binary
-*.3gp binary
-*.as binary
-*.asf binary
-*.asx binary
-*.fla binary
-*.flv binary
-*.m4v binary
-*.mng binary
-*.mov binary
-*.mp4 binary
-*.mpeg binary
-*.mpg binary
-*.swc binary
-*.swf binary
-*.webm binary
-## 壓縮
-*.7z binary
-*.gz binary
-*.rar binary
-*.tar binary
-*.zip binary
-## FONTS
-*.ttf binary
-*.eot binary
-*.otf binary
-*.woff binary
-*.woff2 binary
-## 可執行
-*.exe binary
+# Web / CSS
+*.css   text diff=css
+*.scss  text diff=css
+*.sass  text
+*.less  text
+*.styl  text
 
-# linter
-.csslintrc text
-.eslintrc text
-.jscsrc text
-.jshintrc text
-.jshintignore text
-.stylelintrc text
-.stylecop text
+# Web / HTML & 樣板
+*.htm    text diff=html
+*.html   text diff=html
+*.xhtml  text diff=html
+*.cshtml text diff=html
 
-# 設定類型
-*.bowerrc text
-*.cnf text
-*.conf text
-*.config text
-.browserslistrc text
-.editorconfig text
-.gitattributes text
-.gitconfig text
-.gitignore text
-.htaccess text
-*.npmignore text
-*.yaml text
-*.yml text
-browserslist text
-Makefile text
-makefile text
-*.ps1 text
-*.bat text eol=crlf
+# JavaScript / TypeScript
+*.js    text
+*.mjs   text
+*.cjs   text
+*.jsx   text
+*.ts    text
+*.tsx   text
 *.coffee text
-*.css text
-*.htm text
-*.html text
-*.inc text
-*.ini text
-*.js text
-*.json text
-*.jsx text
-*.less text
-*.od text
-*.onlydata text
-*.php text
-*.pl text
-*.py text
-*.rb text
-*.sass text
-*.scm text
-*.scss text
-*.sh text eol=lf
-*.sql text
-*.styl text
-*.tag text
-*.ts text
-*.tsx text
-*.xml text
-*.xhtml text
-*.cs text diff=csharp
-*.dockerignore text
-Dockerfile text
 
+# PHP
+*.php  text
+*.inc  text
 
+# Python
+*.py   text
 
-# Sources
+# Ruby
+*.rb   text
+
+# Shell
+*.sh   text eol=lf
+
+# Perl
+*.pl   text
+
+# PowerShell（在 Windows 上慣用 CRLF）
+*.ps1  text eol=crlf
+
+# Batch（必須 CRLF）
+*.bat  text eol=crlf
+
+# Go（-text 跳過斷行轉換；Go 工具鏈自行處理）
+*.go   -text diff=golang
+
+# C / C++
 *.c     text diff=cpp
 *.cc    text diff=cpp
 *.cxx   text diff=cpp
 *.cpp   text diff=cpp
 *.cpi   text diff=cpp
 *.c++   text diff=cpp
-*.hpp   text diff=cpp
 *.h     text diff=cpp
-*.h++   text diff=cpp
 *.hh    text diff=cpp
+*.hpp   text diff=cpp
+*.h++   text diff=cpp
 
-# Compiled Object files
-*.slo   binary
-*.lo    binary
-*.o     binary
-*.obj   binary
+# C#
+*.cs      text diff=csharp
+*.csx     text diff=csharp
 
-# Precompiled Headers
-*.gch   binary
-*.pch   binary
+# Java / JVM 生態
+*.java        text diff=java
+*.kt          text diff=kotlin
+*.groovy      text diff=java
+*.scala       text diff=java
+*.gradle      text diff=java
+*.gradle.kts  text diff=kotlin
+*.jsp         text
+*.jspf        text
+*.jspx        text
+*.tld         text
+*.tag         text
+*.tagx        text
+*.properties  text
 
-# Compiled Dynamic libraries
-*.so    binary
-*.dylib binary
-*.dll   binary
+# SQL
+*.sql  text
 
-# Compiled Static libraries
-*.lai   binary
-*.la    binary
-*.a     binary
-*.lib   binary
+# XML / 通用標記
+*.xml  text
+*.xsl  text
+*.xsd  text
 
-# Executables
-*.exe   binary
-*.out   binary
-*.app   binary
+# JSON / YAML / TOML
+*.json  text
+*.yaml  text
+*.yml   text
+*.toml  text
 
-# csharp
-*.cs       text diff=csharp
-*.cshtml   text diff=html
-*.csx      text diff=csharp
-*.sln      text eol=crlf
-*.csproj   text eol=crlf
+# 鎖定檔（關閉 diff；大量自動產生的異動沒有閱讀價值）
+package-lock.json  text -diff
+yarn.lock          text -diff
+pnpm-lock.yaml     text -diff
+Gemfile.lock       text -diff
 
-# golang
-*.go -text diff=golang
+# 環境變數
+*.env  text
 
-# Java sources
-*.java          text diff=java
-*.kt            text diff=kotlin
-*.groovy        text diff=java
-*.scala         text diff=java
-*.gradle        text diff=java
-*.gradle.kts    text diff=kotlin
+# GraphQL
+*.graphql  text
+*.gql      text
 
-# These files are text and should be normalized (Convert crlf => lf)
-*.css           text diff=css
-*.scss          text diff=css
-*.sass          text
-*.df            text
-*.htm           text diff=html
-*.html          text diff=html
-*.js            text
-*.mjs           text
-*.cjs           text
-*.jsp           text
-*.jspf          text
-*.jspx          text
-*.properties    text
-*.tld           text
-*.tag           text
-*.tagx          text
-*.xml           text
+# Prisma
+*.prisma  text
 
-# These files are binary and should be left untouched
-# (binary is a macro for -text -diff)
-*.class         binary
-*.dll           binary
-*.ear           binary
-*.jar           binary
-*.so            binary
-*.war           binary
-*.jks           binary
+# ──────────────────────────────────────────────────────────────────────────────
+# 設定 / 工具檔案
+# ──────────────────────────────────────────────────────────────────────────────
+.browserslistrc  text
+.bowerrc         text
+.editorconfig    text
+.eslintrc        text
+.csslintrc       text
+.jscsrc          text
+.jshintrc        text
+.jshintignore    text
+.stylelintrc     text
+.stylecop        text
+.gitattributes   text
+.gitconfig       text
+.gitignore       text
+.htaccess        text
+*.bowerrc        text
+*.cnf            text
+*.conf           text
+*.config         text
+*.dockerignore   text
+*.npmignore      text
+*.ini            text
+*.od             text
+*.onlydata       text
+*.scm            text
+browserslist     text
+Dockerfile       text
 
-# Common build-tool wrapper scripts ('.cmd' versions are handled by 'Common.gitattributes')
-mvnw            text eol=lf
-gradlew         text eol=lf
+# Makefile（強制 LF；Windows 上的 make 也能讀取 LF）
+Makefile   text eol=lf
+makefile   text eol=lf
 
-# vi
-*.vim text eol=lf
-.vimrc text eol=lf
+# Vim
+*.vim   text eol=lf
+.vimrc  text eol=lf
 .gvimrc text eol=lf
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Visual Studio / .NET 專案檔（強制 CRLF）
+# ──────────────────────────────────────────────────────────────────────────────
+*.sln        text eol=crlf
+*.csproj     text eol=crlf
+*.vbproj     text eol=crlf
+*.vcxproj    text eol=crlf
+*.vcproj     text eol=crlf
+*.dbproj     text eol=crlf
+*.fsproj     text eol=crlf
+*.lsproj     text eol=crlf
+*.wixproj    text eol=crlf
+*.modelproj  text eol=crlf
+*.sqlproj    text eol=crlf
+*.wmaproj    text eol=crlf
+*.xproj      text eol=crlf
+*.props      text eol=crlf
+*.filters    text eol=crlf
+*.vcxitems   text eol=crlf
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 建置工具包裝腳本
+# ──────────────────────────────────────────────────────────────────────────────
+mvnw     text eol=lf
+gradlew  text eol=lf
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 二進位：圖像
+# ──────────────────────────────────────────────────────────────────────────────
+*.ai    binary
+*.bmp   binary
+*.eps   binary
+*.gif   binary
+*.ico   binary
+*.jng   binary
+*.jp2   binary
+*.jpg   binary
+*.jpeg  binary
+*.jpx   binary
+*.jxr   binary
+*.png   binary
+*.psb   binary
+*.psd   binary
+# SVG 本質是 XML，但設計工具產出的 SVG 通常為單行大型檔案，
+# 保留 binary 可避免斷行轉換破壞檔案或產生無意義的 diff
+*.svg   binary
+*.svgz  binary
+*.tif   binary
+*.tiff  binary
+*.wbmp  binary
+*.webp  binary
+
+# PDF（二進位；diff=astextplain 與 binary 互斥，以 binary 為準）
+*.pdf   binary
+*.PDF   binary
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 二進位：音訊
+# ──────────────────────────────────────────────────────────────────────────────
+*.kar   binary
+*.m4a   binary
+*.mid   binary
+*.midi  binary
+*.mp3   binary
+*.ogg   binary
+*.ra    binary
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 二進位：影片
+# ──────────────────────────────────────────────────────────────────────────────
+*.3gp   binary
+*.3gpp  binary
+*.asf   binary
+*.asx   binary
+*.fla   binary
+*.flv   binary
+*.m4v   binary
+*.mng   binary
+*.mov   binary
+*.mp4   binary
+*.mpeg  binary
+*.mpg   binary
+*.swc   binary
+*.swf   binary
+*.webm  binary
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 二進位：壓縮
+# ──────────────────────────────────────────────────────────────────────────────
+*.7z   binary
+*.gz   binary
+*.rar  binary
+*.tar  binary
+*.zip  binary
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 二進位：字型
+# ──────────────────────────────────────────────────────────────────────────────
+*.ttf    binary
+*.eot    binary
+*.otf    binary
+*.woff   binary
+*.woff2  binary
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 二進位：已編譯物件 / 函式庫 / 可執行檔
+# ──────────────────────────────────────────────────────────────────────────────
+*.slo    binary
+*.lo     binary
+*.o      binary
+*.obj    binary
+*.gch    binary
+*.pch    binary
+*.so     binary
+*.dylib  binary
+*.dll    binary
+*.lai    binary
+*.la     binary
+*.a      binary
+*.lib    binary
+*.exe    binary
+*.out    binary
+*.app    binary
+*.class  binary
+*.ear    binary
+*.jar    binary
+*.war    binary
+*.jks    binary
