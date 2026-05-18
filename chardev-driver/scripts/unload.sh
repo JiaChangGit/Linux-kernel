@@ -9,3 +9,7 @@ ls /proc/chardev_info 2>/dev/null && echo "WARNING: proc entry still exists" || 
 
 echo "[+] dmesg:"
 sudo dmesg | tail -3
+
+cd driver
+make clean
+cd ..

@@ -1,7 +1,7 @@
 # 韌體工程師面試完全攻略
 ## 台灣科技業 Linux Kernel / Embedded Systems 面試問答整理
 
-> 適用職位：韌體工程師、BSP 工程師、嵌入式 Linux 工程師、驅動程式工程師  
+> 適用職位：韌體工程師、BSP 工程師、嵌入式 Linux 工程師、驅動程式工程師
 > 涵蓋範圍：Linux Kernel、Driver、Memory、Process、即時系統、通訊協定、Build System
 
 ---
@@ -31,7 +31,7 @@
 
 ## Q1. 描述 `mmap` 的實作原理
 
-### 滿分回答
+### 回答
 
 `mmap()` 的核心作用是將一段檔案或匿名記憶體映射到使用者空間的虛擬位址區間，讓程序能像存取陣列一樣直接讀寫頁面，完全不需要經過 `read()/write()` 的資料複製路徑。
 
@@ -82,17 +82,17 @@ Kernel 根據 VMA 類型判斷：
 
 #### 常見面試追問
 
-**Q: mmap 與 read() 的差別？**  
+**Q: mmap 與 read() 的差別？**
 A: `read()` 需要先從 disk 讀進 kernel page cache，再 copy 到 user buffer（兩次複製）。`mmap` 直接將 page cache 映射到 user space，只有一次映射，I/O 密集場景效能更好。
 
-**Q: 什麼是 Huge TLB？**  
+**Q: 什麼是 Huge TLB？**
 A: 使用 2MB 或 1GB 大頁面替代 4KB 頁面，減少 TLB miss 次數，適合記憶體密集應用。
 
 ---
 
 ## Q2. `kmalloc` 與 `vmalloc` 有何不同？何時用哪個？
 
-### 滿分回答
+### 回答
 
 ```c
 /* kmalloc：實體連續 */
@@ -121,7 +121,7 @@ void *p = vmalloc(size);
 
 ## Q3. `kzalloc` 與 `kmalloc` 有何不同？
 
-### 滿分回答
+### 回答
 
 ```c
 /* kmalloc：只配置，不清零 */
@@ -146,7 +146,7 @@ memset(ptr, 0, size);
 
 ## Q4. `GFP_KERNEL` 與 `GFP_ATOMIC` 有何差異？
 
-### 滿分回答
+### 回答
 
 GFP = **Get Free Pages** flags，告知核心記憶體配置的行為限制。
 
@@ -171,14 +171,14 @@ ptr = kmalloc(size, GFP_ATOMIC);
 - 持有 spinlock 期間
 - Timer callback
 
-**為何不能在 ISR 用 GFP_KERNEL？**  
+**為何不能在 ISR 用 GFP_KERNEL？**
 因為 GFP_KERNEL 可能觸發記憶體回收，進而 sleep/block，而 ISR 必須在 interrupt context 中快速執行，不允許任何形式的睡眠。
 
 ---
 
 ## Q5. 什麼是實體位址與虛擬位址？MMU 如何運作？
 
-### 滿分回答
+### 回答
 
 #### 位址空間概念
 
@@ -228,7 +228,7 @@ CPU 發出虛擬位址 (VA)
 
 ## Q6. 什麼是 HugePages？有什麼優缺點？
 
-### 滿分回答
+### 回答
 
 HugePages 使用比標準 4KB 更大的頁面：
 - **x86**：2MB（Transparent HugePage, THP）、1GB（Huge 1GB）
@@ -257,7 +257,7 @@ echo 512 > /proc/sys/vm/nr_hugepages
 
 ## Q7. `copy_from_user` 為何不能直接用指標存取 User Space？
 
-### 滿分回答
+### 回答
 
 **直接存取的風險：**
 
@@ -297,7 +297,7 @@ if (copy_to_user(user_ptr, &kernel_buf, size)) {
 
 ## Q8. `fork()` 的回傳值與 Copy-On-Write 機制
 
-### 滿分回答
+### 回答
 
 ```c
 pid_t pid = fork();
@@ -340,9 +340,9 @@ fork() 後：
 
 ## Q9. 什麼是殭屍行程（Zombie Process）？如何避免？
 
-### 滿分回答
+### 回答
 
-**殭屍行程定義：**  
+**殭屍行程定義：**
 子行程已結束，但父行程尚未呼叫 `wait()` 收割，子行程的 PCB（Process Control Block）仍殘留在系統中。
 
 ```
@@ -353,7 +353,7 @@ fork() 後：
 父行程呼叫 wait() → 清除 Zombie
 ```
 
-**為什麼有問題：**  
+**為什麼有問題：**
 Zombie 持續佔用 PID，若大量累積可能耗盡 PID 資源（Linux 預設最大 PID 約 32768）。
 
 **解決方法：**
@@ -386,7 +386,7 @@ wait(NULL);  /* 父行程等待子行程 */
 
 ## Q10. Linux 排程演算法：CFS 是如何運作的？
 
-### 滿分回答
+### 回答
 
 Linux 的預設排程器是 **CFS（Completely Fair Scheduler）**，目標是給每個 task 公平的 CPU 時間。
 
@@ -433,7 +433,7 @@ Stop → Deadline → Realtime → CFS → Idle
 
 ## Q11. 什麼是 Context Switch？成本是什麼？
 
-### 滿分回答
+### 回答
 
 Context Switch 是 CPU 從執行一個 task 切換到另一個 task 的過程。
 
@@ -456,7 +456,7 @@ Context Switch 是 CPU 從執行一個 task 切換到另一個 task 的過程。
 | Cache cold | 新 task 的資料不在 cache，大量 cache miss |
 | Pipeline flush | 分支預測失效 |
 
-**Thread vs Process Context Switch：**  
+**Thread vs Process Context Switch：**
 同一 process 的 thread 切換不需要切換 page table，成本遠低於 process 切換。
 
 ---
@@ -467,7 +467,7 @@ Context Switch 是 CPU 從執行一個 task 切換到另一個 task 的過程。
 
 ## Q12. Linux 字元裝置完整註冊流程
 
-### 滿分回答
+### 回答
 
 ```c
 /* 完整的字元驅動程式框架 */
@@ -559,7 +559,7 @@ device_create()         → 建立 /dev/mychardev
 
 ## Q13. `ioctl` 的 Magic Number 是什麼？如何正確定義？
 
-### 滿分回答
+### 回答
 
 `ioctl` 命令碼由 4 個欄位組成：
 
@@ -613,14 +613,14 @@ static long dev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 }
 ```
 
-**Magic Number 的重要性：**  
+**Magic Number 的重要性：**
 避免不同 driver 的 ioctl 命令碼衝突，若一個程式誤用了另一個 driver 的 fd 發送 ioctl，Magic Number 不符會讓 kernel 或 driver 拒絕。
 
 ---
 
 ## Q14. 什麼是 Platform Driver？與一般 Driver 的差異？
 
-### 滿分回答
+### 回答
 
 **Platform Device** 是不可熱插拔的裝置，通常是 SoC 上直接整合的周邊（UART、SPI 控制器、GPIO 等）。
 
@@ -674,7 +674,7 @@ module_platform_driver(my_driver);
 
 ## Q15. `devm_*` 系列函式有什麼好處？
 
-### 滿分回答
+### 回答
 
 `devm_` 前綴表示 **Device Managed Resource**，資源的生命週期綁定到 device，driver `remove` 或 `probe` 失敗時自動釋放。
 
@@ -713,7 +713,7 @@ devm_request_irq(&pdev->dev, irq, handler, 0, "name", NULL);
 
 ## Q16. 中斷上半部與下半部（Top Half / Bottom Half）
 
-### 滿分回答
+### 回答
 
 中斷處理分為兩個階段，核心原則：**上半部越快越好，下半部處理實際工作**。
 
@@ -786,7 +786,7 @@ static void my_work_func(struct work_struct *work)
 
 ## Q17. `spinlock` 與 `mutex` 的差異，何時使用哪個？
 
-### 滿分回答
+### 回答
 
 #### 核心差異
 
@@ -833,7 +833,7 @@ mutex_unlock(&my_mutex);
 
 ## Q18. 什麼是 RCU（Read-Copy-Update）？
 
-### 滿分回答
+### 回答
 
 RCU 是一種針對**讀多寫少**場景優化的同步機制，Reader 完全無鎖、零開銷。
 
@@ -877,24 +877,24 @@ Writer 替換指標後，等待所有 CPU 都經歷過一次排程（Grace Perio
 
 ## Q19. 什麼是 Device Tree？解決了什麼問題？
 
-### 滿分回答
+### 回答
 
-**問題背景（ARM 的 Board File 災難）：**  
+**問題背景（ARM 的 Board File 災難）：**
 ARM 早期每個板子都要一個獨立的 `board-xxx.c`，裡面寫死了所有硬體資訊（GPIO、IRQ、MMIO），導致 kernel 充滿幾百個幾乎相同的板子檔案，Linus 大罵這是 "This whole ARM thing is a fucking pain in the ass"。
 
-**Device Tree 解法：**  
+**Device Tree 解法：**
 將硬體描述從 kernel 抽出，放入 `.dts` 文字檔，編譯成 `.dtb` 二進制，Bootloader 載入並傳給 kernel。
 
 ```dts
 /* 範例 .dts */
 / {
     compatible = "vendor,my-board";
-    
+
     memory@80000000 {
         device_type = "memory";
         reg = <0x80000000 0x40000000>; /* 1GB RAM */
     };
-    
+
     uart0: serial@10000000 {
         compatible = "vendor,my-uart";
         reg = <0x10000000 0x1000>;
@@ -902,13 +902,13 @@ ARM 早期每個板子都要一個獨立的 `board-xxx.c`，裡面寫死了所�
         clocks = <&uart_clk>;
         status = "okay";
     };
-    
+
     i2c0: i2c@20000000 {
         compatible = "vendor,my-i2c";
         reg = <0x20000000 0x100>;
         #address-cells = <1>;
         #size-cells = <0>;
-        
+
         /* I2C 裝置 */
         sensor@48 {
             compatible = "ti,tmp102";
@@ -927,7 +927,7 @@ ARM 早期每個板子都要一個獨立的 `board-xxx.c`，裡面寫死了所�
 
 ## Q20. Kernel 如何透過 `compatible` 字串匹配 Driver？
 
-### 滿分回答
+### 回答
 
 ```
 Device Tree：
@@ -954,10 +954,10 @@ static int my_uart_probe(struct platform_device *pdev)
 {
     const struct of_device_id *match;
     match = of_match_node(my_uart_of_match, pdev->dev.of_node);
-    
+
     /* 讀取 DT 屬性 */
     of_property_read_u32(pdev->dev.of_node, "clock-frequency", &clk_freq);
-    
+
     return 0;
 }
 ```
@@ -970,7 +970,7 @@ static int my_uart_probe(struct platform_device *pdev)
 
 ## Q21. VFS（Virtual File System）的架構與關鍵資料結構
 
-### 滿分回答
+### 回答
 
 VFS 是 Linux 的抽象層，讓所有檔案系統（ext4、FAT、proc、sysfs）呈現統一的介面。
 
@@ -1020,7 +1020,7 @@ namei lookup（路徑解析）
 
 ## Q22. 什麼是 `seq_file`？為何要用它？
 
-### 滿分回答
+### 回答
 
 `seq_file` 解決了傳統 `/proc` 輸出的問題：若資料超過一個 page（4KB），`read()` 只能讀到一部分。
 
@@ -1067,7 +1067,7 @@ static const struct file_operations my_fops = {
 
 ## Q23. I2C 通訊協定詳解
 
-### 滿分回答
+### 回答
 
 I2C（Inter-Integrated Circuit）是兩線式同步串列通訊協定。
 
@@ -1094,19 +1094,19 @@ START  A6 A5 A4 A3 A2 A1 A0  R/W  ACK  D7...D0  ACK  STOP
 static int my_i2c_read(struct i2c_client *client, u8 reg, u8 *val)
 {
     struct i2c_msg msgs[2];
-    
+
     /* Write phase: 送出暫存器位址 */
     msgs[0].addr  = client->addr;
     msgs[0].flags = 0;  /* Write */
     msgs[0].len   = 1;
     msgs[0].buf   = &reg;
-    
+
     /* Read phase: 讀取資料 */
     msgs[1].addr  = client->addr;
     msgs[1].flags = I2C_M_RD;  /* Read */
     msgs[1].len   = 1;
     msgs[1].buf   = val;
-    
+
     return i2c_transfer(client->adapter, msgs, 2);
 }
 
@@ -1119,7 +1119,7 @@ i2c_smbus_write_byte_data(client, reg, value);
 
 ## Q24. SPI 通訊協定詳解
 
-### 滿分回答
+### 回答
 
 SPI（Serial Peripheral Interface）是四線式同步串列通訊協定。
 
@@ -1152,7 +1152,7 @@ SPI（Serial Peripheral Interface）是四線式同步串列通訊協定。
 
 ## Q25. UART 通訊協定詳解
 
-### 滿分回答
+### 回答
 
 UART（Universal Asynchronous Receiver/Transmitter）是最簡單的串列通訊。
 
@@ -1184,7 +1184,7 @@ IDLE  START  D0 D1 D2 D3 D4 D5 D6 D7  STOP  IDLE
 
 ## Q26. GPIO 操作與 Linux GPIO 子系統
 
-### 滿分回答
+### 回答
 
 GPIO（General Purpose Input/Output）是最基本的數位訊號控制。
 
@@ -1236,7 +1236,7 @@ devm_request_irq(dev, irq, my_handler,
 
 ## Q27. 嵌入式 Linux 完整 Boot 流程
 
-### 滿分回答
+### 回答
 
 ```
 上電 / Reset
@@ -1279,7 +1279,7 @@ devm_request_irq(dev, irq, my_handler,
 
 ## Q28. U-Boot 常用指令與環境變數
 
-### 滿分回答
+### 回答
 
 ```bash
 # 查看環境變數
@@ -1335,7 +1335,7 @@ loglevel=7             # 詳細 kernel log
 
 ## Q29. RTOS 與 GPOS（Linux）的核心差異
 
-### 滿分回答
+### 回答
 
 | 比較項目 | RTOS | GPOS（Linux） |
 |---|---|---|
@@ -1363,7 +1363,7 @@ grep PREEMPT /boot/config-$(uname -r)
 
 ## Q30. FreeRTOS 核心概念
 
-### 滿分回答
+### 回答
 
 FreeRTOS 是最流行的嵌入式 RTOS，常見於 MCU（STM32、ESP32）。
 
@@ -1412,7 +1412,7 @@ Running → Blocked（等待）
 
 ## Q31. 什麼是 Interrupt Latency？如何測量與優化？
 
-### 滿分回答
+### 回答
 
 Interrupt Latency = 硬體中斷觸發 → ISR 第一行執行的時間差
 
@@ -1453,7 +1453,7 @@ echo irqsoff > /sys/kernel/debug/tracing/current_tracer
 
 ## Q32. Yocto Project 核心概念
 
-### 滿分回答
+### 回答
 
 Yocto 是業界標準的嵌入式 Linux 建構系統，由 Linux Foundation 維護。
 
@@ -1526,7 +1526,7 @@ do_install() {
 
 ## Q33. Buildroot 與 Yocto 的比較
 
-### 滿分回答
+### 回答
 
 | 比較 | Buildroot | Yocto |
 |---|---|---|
@@ -1541,7 +1541,7 @@ do_install() {
 
 ## Q34. Cross Compilation 與工具鏈
 
-### 滿分回答
+### 回答
 
 **Cross Compilation** = 在 A 架構的主機上，編譯出給 B 架構執行的程式。
 
@@ -1598,7 +1598,7 @@ ${CROSS_COMPILE}strip myapp  # 移除 debug symbols，縮小體積
 
 ## Q35. Kernel Oops 與 Panic 如何分析？
 
-### 滿分回答
+### 回答
 
 **Kernel Oops** = kernel 遇到非致命錯誤（如 NULL pointer dereference）
 
@@ -1637,7 +1637,7 @@ objdump -d my_driver.ko | grep -A 20 "<my_driver_func>"
 
 ## Q36. 如何使用 `ftrace` 追蹤 Kernel 行為？
 
-### 滿分回答
+### 回答
 
 `ftrace` 是 Linux 內建的 kernel tracer。
 
@@ -1672,7 +1672,7 @@ echo irqsoff > current_tracer
 
 ## Q37. `printk` 日誌層級與使用建議
 
-### 滿分回答
+### 回答
 
 ```c
 /* 8 個層級，數字越小越嚴重 */
@@ -1710,7 +1710,7 @@ journalctl -k            # systemd 系統查看 kernel log
 
 ## Q38. 如何使用 `perf` 進行效能分析？
 
-### 滿分回答
+### 回答
 
 ```bash
 # 即時查看 CPU hotspot
@@ -1753,7 +1753,7 @@ Overhead  Symbol
 
 ## Q39. Linux 電源管理框架（Runtime PM）
 
-### 滿分回答
+### 回答
 
 **系統級電源管理：**
 
@@ -1805,7 +1805,7 @@ static const struct dev_pm_ops my_pm_ops = {
 
 ## Q40. 什麼是 Clock Framework（clk）？
 
-### 滿分回答
+### 回答
 
 Linux Common Clock Framework (CCF) 統一管理 SoC 上所有時鐘。
 
@@ -1848,7 +1848,7 @@ unsigned long rate = clk_get_rate(clk);
 
 ## Q41. ARM TrustZone 是什麼？
 
-### 滿分回答
+### 回答
 
 TrustZone 是 ARM 處理器的硬體安全擴充，將系統分為兩個世界：
 
@@ -1880,7 +1880,7 @@ TrustZone 是 ARM 處理器的硬體安全擴充，將系統分為兩個世界�
 
 ## Q42. Secure Boot 流程
 
-### 滿分回答
+### 回答
 
 ```
 晶片燒錄公鑰 Hash（OTP/eFuse，不可修改）
@@ -1918,7 +1918,7 @@ mount /dev/mapper/verified_root /mnt
 
 ## Q43. `volatile` 關鍵字在嵌入式中的重要性
 
-### 滿分回答
+### 回答
 
 `volatile` 告訴編譯器：**不要對這個變數做最佳化，每次都從記憶體讀取。**
 
@@ -1945,14 +1945,14 @@ void main_loop(void) {
 }
 ```
 
-**volatile 不能取代 memory barrier：**  
+**volatile 不能取代 memory barrier：**
 在多核系統上，還需要 `smp_rmb()` / `smp_wmb()` 確保記憶體存取順序。
 
 ---
 
 ## Q44. `static` 關鍵字在 Kernel 中的作用
 
-### 滿分回答
+### 回答
 
 ```c
 /* 函式的 static：限制在本檔案可見（internal linkage）*/
@@ -1978,7 +1978,7 @@ void increment(void) {
 
 ## Q45. `container_of` 巨集詳解
 
-### 滿分回答
+### 回答
 
 ```c
 /* 定義 */
@@ -2023,7 +2023,7 @@ container_of(pos, struct my_device, list)
 
 ## Q46. Endianness（位元組序）問題
 
-### 滿分回答
+### 回答
 
 ```c
 /* 大端（Big Endian）：高位在低位址 */
@@ -2051,14 +2051,14 @@ htonl(val);  /* host to network long (big endian) */
 ntohl(val);  /* network to host long */
 ```
 
-**實際問題：**  
+**實際問題：**
 讀取硬體暫存器時，必須確認 SoC 和 driver 的 endianness 設定一致，否則讀到的值全是錯的。
 
 ---
 
 ## Q47. MMIO：Memory-Mapped I/O
 
-### 滿分回答
+### 回答
 
 MMIO 讓 CPU 透過記憶體存取指令（load/store）來操作硬體暫存器。
 
@@ -2100,7 +2100,7 @@ iounmap(base);
 
 ## Q48. 記憶體屏障（Memory Barrier）
 
-### 滿分回答
+### 回答
 
 在多核或有 out-of-order execution 的 CPU 上，編譯器和 CPU 可能重排記憶體存取順序。Memory Barrier 強制保證順序。
 
@@ -2193,17 +2193,16 @@ value = READ_ONCE(shared_var);
 
 ## 常見追問問題
 
-**Q: 你說 kzalloc 比較安全，那效能呢？**  
+**Q: 你說 kzalloc 比較安全，那效能呢？**
 A: memset 有額外開銷，但現代 CPU 的 memset 非常快，對 4KB 以下的配置影響微乎其微。Driver 初始化路徑通常不是效能瓶頸，安全性優先，使用 kzalloc。
 
-**Q: 中斷下半部三種方式你會怎麼選？**  
+**Q: 中斷下半部三種方式你會怎麼選？**
 A: 優先考慮 workqueue（因為可睡眠、最靈活）。若不需要睡眠且使用頻率低，用 tasklet。只有像網路協定棧這種極高頻且有並行需求的才用 softirq（因為需要多 CPU 並行且不能睡眠）。
 
-**Q: 有沒有用過 JTAG 或其他 debug 工具？**  
+**Q: 有沒有用過 JTAG 或其他 debug 工具？**
 A: JTAG 可以在 CPU 暫停時直接存取暫存器和記憶體，連 boot 早期問題都能抓。搭配 OpenOCD + GDB 可以設斷點、單步追蹤 kernel。
 
 ---
 
-> 本文件版本：v2.0  
-> 內容涵蓋：Linux Kernel、Driver、Memory、Process、RTOS、通訊協定、Build System、除錯工具  
-> 適用於台灣科技業韌體工程師 / BSP 工程師面試準備
+> 本文件版本：v2.0
+> 內容涵蓋：Linux Kernel、Driver、Memory、Process、RTOS、通訊協定、Build System、除錯工具

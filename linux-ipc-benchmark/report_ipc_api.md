@@ -18,7 +18,7 @@
 - **Header Files**:
     - `user/common.h`: 定義核心與使用者空間共用的常數 (`MSG_SIZE`, `RING_CAPACITY`) 與資料結構 (`shm_region_t`)。
 - **Build System**:
-    - **目前程式碼中未觀察到**單獨的 `Makefile`。根據 `scripts/01_setup.sh` 判斷，驅動使用 Kbuild 編譯，使用者程式則直接呼叫 `gcc`。
+    - `Makefile`。
 - **Scripts**:
     - `01_setup.sh`: 編譯並載入模組，建立 `/dev/` 裝置與權限。
     - `02_demo.sh`: 執行 MQ 與 SHM 的功能演示。
@@ -143,5 +143,4 @@
 
 ---
 **結論**：`/linux-ipc-benchmark` 透過極具教育意義的程式碼結構，清晰地揭示了 Linux IPC 的效能瓶頸所在：**「系統呼叫開銷」與「核心/使用者空間拷貝」**。其 SHM Mmap 實作是現代高效能系統（如 DPDK、ZeroMQ）底層技術的微縮版。
-檔案分析時間：2026-05-17
-分析者：Gemini CLI
+

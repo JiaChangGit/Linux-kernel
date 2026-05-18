@@ -18,7 +18,7 @@
     - `include/shell.h`: 全域型別定義與狀態。
     - `include/parser.h`, `include/executor.h`, `include/builtin.h`: 模組化介面定義。
 - **Build System**:
-    - **目前程式碼中未觀察到** `Makefile`。根據 `main.c` 註釋，使用 `gcc -lreadline` 進行連結。
+    - `Makefile`。
 - **Component Relationship**:
     `main` 驅動 `shell` 進入 REPL；`shell` 呼叫 `parser` 將字串轉換為 `Pipeline` 結構，再交由 `executor` 執行；`executor` 在分派時區分內建指令 (`builtin`) 與外部程式。
 
@@ -29,7 +29,7 @@
 - **Callbacks / Function Pointers**:
     - `BuiltinEntry`: 使用「名稱 → 函式指標」的 Dispatch Table 機制。
     - `sigaction`: 處理 `SIGCHLD` (非同步回收)、`SIGINT` (Ctrl+C 攔截)。
-- **Memory Management**: 
+- **Memory Management**:
     - 採用 `strdup` 動態配置字串。
     - `free_pipeline` 負責遞迴釋放整個 Pipeline 結構內的 heap 記憶體。
     - `g_shell.history` 使用環形緩衝區 (Circular Buffer) 管理歷史記錄。
@@ -126,5 +126,4 @@ SIGCHLD -> sigchld_handler -> while(waitpid(-1, ..., WNOHANG) > 0)
 
 ---
 **結論**：`fwsh` 是一個設計嚴謹、模組化程度極高的 Shell 實作。其在處理管線同步、訊號安全以及為韌體工程師量身定做工具組方面的表現，使其超越了普通的練習專案，具備了作為小型嵌入式系統診斷殼層的潛力。
-檔案分析時間：2026-05-17
-分析者：Gemini CLI
+

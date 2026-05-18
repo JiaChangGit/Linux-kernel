@@ -130,5 +130,4 @@ PM core -> myled_suspend -> Clear MYLED_CTRL_ENABLE bit
 
 ---
 **結論**：`/qemu-platform-demo` 展示了一個現代 Linux 核心驅動的典範實作。透過整合 Device Tree 解析、Managed 資源管理與自動化 Fallback 機制，該驅動不僅具備高度的硬體相容性，也展現了優異的軟體魯棒性，是學習 Linux 平台驅動與虛擬硬體互動的理想案例。
-檔案分析時間：2026-05-17
-分析者：Gemini CLI
+

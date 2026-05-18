@@ -14,7 +14,7 @@
 - **Header Files**:
     - `driver/chardev.h`: 定義 IOCTL Magic Number 及 Command 序號。
 - **Build System**:
-    - **目前程式碼中未觀察到** `Makefile`。雖 `scripts/load.sh` 意圖呼叫 `make`，但實體檔案缺失。
+    - `Makefile`。
 - **Scripts**:
     - `scripts/load.sh`: 封裝編譯、載入、權限設定與驗證流程。
     - `scripts/unload.sh`: 執行移除模組與清理驗證。
@@ -134,9 +134,7 @@ Userspace Buf -> copy_from_user -> drv.buf (Protected by mutex)
 
 - **缺失 `lseek` 實作**: 雖然 `test_app.c` 呼叫了 `lseek(fd, 0, SEEK_SET)`，但 `chardev_fops` 並未定義 `.llseek`。這導致 VFS 使用預設行為，對於某些特殊裝置可能會產生非預期位址存取。
 - **Write Buffer 覆寫**: 目前 `write` 實作會重置 `drv.buf_len` 並從頭寫入。若多個行程併發寫入，雖然有 `mutex` 保護，但會發生 Data Race (後者覆蓋前者)，而非 Append。
-- **Makefile 缺失**: 無法從專案內直接驗證編譯參數 (如核心標頭檔路徑)。
 
 ---
 **結論**: 本驅動展示了典型的 Linux 裝置驅動架構，整合了多種核心介面。資源生命週期管理嚴謹，但在 VFS 完整性 (lseek) 與併發資料模型 (Append vs Overwrite) 上有優化空間。
-檔案分析時間：2026-05-17
-分析者：Gemini CLI
+

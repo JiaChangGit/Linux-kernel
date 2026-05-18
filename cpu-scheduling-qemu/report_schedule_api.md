@@ -138,5 +138,4 @@ compute_stats() -> turnaround = finish - arrival -> print_results()
 
 ---
 **結論**：`/cpu-scheduling-qemu` 的模擬器設計精簡且高效，透過靜態資源配置與標準化輸出，成功建立了一個易於在 QEMU 自動化環境中驗證的調度分析平台。
-檔案分析時間：2026-05-17
-分析者：Gemini CLI
+
