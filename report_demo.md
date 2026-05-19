@@ -69,7 +69,7 @@
     - **問題描述**: 在多核環境測試時，共享記憶體的吞吐量遠低於理論值。
     - **技術根因**: `head` 與 `tail` 指標位於同一個 **Cache Line (快取行)**。當 CPU A 更新 `head` 時，CPU B 的 Cache Line 會失效 (Invalidate)，導致不斷的快取顛簸。
     - **回答 (Perfect Solution)**:
-        「我透過 `perf c2c` 工具定位到高頻率的 Cache Miss。解決方案是在結構體中使用 **Padding (填充)** 技術。在 `head` 與 `tail` 之間加入 `uint8_t _pad[48]`（假設 Cache Line 為 64 bytes），強制將兩者隔離在不同快取行。這消除了 MESI 協定下的快取一致性風暴，在雙核測試中將 Throughput 提升了約 40%。」
+        「我透過 `perf c2c` 工具定位到高頻率的 Cache Miss。解決方案是在結構體中使用 **Padding (填充)** 技術。在 `head` 與 `tail` 之間加入 `pad[60]`（假設 Cache Line 為 64 bytes），強制將兩者隔離在不同快取行。這消除了 MESI 協定下的快取一致性風暴，在雙核測試中將 Throughput 提升了約 40%。」
     - **關鍵字解析**:
         - **快取偽共享 (False Sharing)**: 多個 CPU 核心頻繁修改位於同一快取行的不同變數，導致效能下降的現象。
         - **快取行 (Cache Line)**: CPU 從記憶體讀取資料的最小單位，通常為 64 位元組。
@@ -206,7 +206,7 @@
 
 ### 效能與優化題
 - **Q: 什麼是 False Sharing？你在專案中如何解決？**
-    - **回答**: 多核心修改同一 Cache Line 的不同變數導致頻繁失效。我在指標間加入 48 bytes Padding 解決此問題。
+    - **回答**: 多核心修改同一 Cache Line 的不同變數導致頻繁失效。我在指標間加入 60 bytes Padding 解決此問題。
 - **Q: 為什麼 mmap 比 read/write 快？**
     - **回答**: `read/write` 需要兩次拷貝且頻繁進入系統呼叫。`mmap` 則是建立頁表映射，實現零拷貝與零系統呼叫。
 

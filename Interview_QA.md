@@ -1,5 +1,5 @@
 # 韌體工程師面試完全攻略
-## 台灣科技業 Linux Kernel / Embedded Systems 面試問答整理
+## Linux Kernel / Embedded Systems 面試問答整理
 
 > 適用職位：韌體工程師、BSP 工程師、嵌入式 Linux 工程師、驅動程式工程師
 > 涵蓋範圍：Linux Kernel、Driver、Memory、Process、即時系統、通訊協定、Build System

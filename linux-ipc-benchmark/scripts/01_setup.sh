@@ -33,8 +33,6 @@ ok "Dependencies installed"
 # ── 3. Build kernel modules ────────────────────────────────────────
 echo ""
 echo "[2/4]  Building kernel modules…"
-cd kernel && make
-cd ..
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 

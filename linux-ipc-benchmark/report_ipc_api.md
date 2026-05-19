@@ -347,7 +347,6 @@ user/shm_demo.c / user/benchmark.c
 ```text
 scripts/01_setup.sh
   -> apt-get update/install dependencies
-  -> cd kernel && make
   -> make -C "${PROJECT_DIR}" kernel
   -> make -C "${PROJECT_DIR}" user
   -> insmod kernel/mq_module.ko
@@ -564,12 +563,13 @@ pthread_create in benchmark
 
 - 定義位置：`kernel/shm_module.c`。
 - 欄位：
-  - `volatile uint32_t head`
-  - `volatile uint32_t tail`
+  - `alignas(64) volatile uint32_t head`
+  - `uint8_t pad1[60]`
+  - `alignas(64) volatile uint32_t tail`
+  - `uint8_t pad2[60]`
   - `uint32_t capacity`
   - `uint32_t msg_size`
-  - `uint8_t _pad[48]`
-  - `uint8_t data[RING_CAPACITY][MSG_SIZE]`
+  - `char data[RING_CAPACITY][MSG_SIZE]`
 - allocation / init：
   - `shm_init()` 呼叫 `vmalloc(SHM_BUF_SIZE)`。
   - `memset(g_shm, 0, SHM_BUF_SIZE)`。
@@ -1122,14 +1122,13 @@ SHM mmap path 的效能差異主要來自每筆 message 避開 VFS syscall dispa
 
 # Direct Observation
 
-- `scripts/01_setup.sh` 先 `cd kernel && make`，又執行 `make -C "${PROJECT_DIR}" kernel`，目前腳本有重複 build 行為。
+- `scripts/01_setup.sh` 執行 `make -C "${PROJECT_DIR}" kernel`。
 - `benchmark.c` 的 `mmap()` 失敗會 `goto done`，最後 `return 0`。
 - `scripts/04_cleanup.sh` 依序卸載 `shm_module` 再卸載 `mq_module`，與兩個 module 間目前沒有直接依賴關係。
 
 # Conservative Inference
 
 - `benchmark.c` 在 mmap failure 下回傳 0 可能讓 shell script 誤判 benchmark 成功。
-- 重複 build 不一定造成錯誤，但會增加 setup 時間與輸出不確定性。
 
 #### Concurrency Issue
 

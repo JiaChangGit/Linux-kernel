@@ -74,7 +74,7 @@
 1.  **核心邊界安全性 (User/Kernel Boundary)**：
     處理使用者空間傳入的非法指標。我們統一採用 `copy_to/from_user` 並嚴格檢查回傳值，確保核心不會因 `EFAULT` 而崩潰 (Panic)。
 2.  **快取偽共享 (False Sharing)**：
-    在 `linux-ipc-benchmark` 的測試中，早期版本的 `head` 與 `tail` 因位於同一 Cache Line 導致效能低落。我們引入了 `_pad[48]` 填充技術解決了此硬體級爭用問題。
+    在 `linux-ipc-benchmark` 的測試中，早期版本的 `head` 與 `tail` 因位於同一 Cache Line 導致效能低落。我們引入了 `pad` 填充技術解決了此硬體級爭用問題。
 3.  **環境一致性問題**：
     為了確保實驗結果可重現，我們為 `cpu-scheduling-qemu` 實作了基於 **Cloud-init** 的自動化環境建置流程，避免了「在我機器上跑得動」的環境偏差。
 

@@ -107,7 +107,7 @@ sudo bash scripts/04_cleanup.sh
 
 ## 🔍 未來延伸探討
 
-1. **快取偽共享 (False Sharing) 的影響**：目前 `shm_region` 已加入 48 位元組的填充（padding），可進一步研究不同 CPU 架構下快取行對齊對效能的提升。
+1. **快取偽共享 (False Sharing) 的影響**：目前 `shm_region` 已加入 60 位元組的填充（padding），可進一步研究不同 CPU 架構下快取行對齊對效能的提升。
 2. **Lock-free 佇列實作**：目前的 `mmap` 路徑使用簡單的記憶體屏障，可嘗試導入更複雜的 CAS (Compare-and-Swap) 指令來實現多生產者/多消費者的無鎖化。
 3. **Huge Pages 整合**：透過映射大頁（Large Pages）來減少 TLB Miss，觀察對極大規模共享記憶體存取的效能影響。
 4. **核心同步原語對比**：比較 `mutex`、`spinlock` 與 `wait_queue` 在極高頻率 IPC 呼叫下的負載特性。

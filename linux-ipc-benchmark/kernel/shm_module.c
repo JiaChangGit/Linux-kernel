@@ -60,12 +60,16 @@ MODULE_VERSION("1.0");
  * don't cause false-sharing on the same cache line.
  */
 struct shm_region {
-    volatile uint32_t head;     /* producer writes this              */
-    volatile uint32_t tail;     /* consumer writes this              */
-    volatile uint32_t capacity;
-    volatile uint32_t msg_size;
-    uint8_t  _pad[48];          /* fill out cache line               */
-    char     data[RING_CAPACITY][MSG_SIZE];
+    alignas(64) volatile uint32_t head;
+    uint8_t pad1[60];
+
+    alignas(64) volatile uint32_t tail;
+    uint8_t pad2[60];
+
+    uint32_t capacity;
+    uint32_t msg_size;
+
+    char data[RING_CAPACITY][MSG_SIZE];
 };
 
 /* size to expose via mmap — must be page-aligned */
