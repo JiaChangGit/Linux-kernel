@@ -1,55 +1,60 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# 全域預設：自動偵測文字/二進位，並正規化斷行為 LF
+# Global defaults
+# - Auto-detect text/binary
+# - Normalize all committed text files to LF in repository
 # ──────────────────────────────────────────────────────────────────────────────
 * text=auto
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 文件 / 純文字
-# ──────────────────────────────────────────────────────────────────────────────
-*.markdown  text
-*.md        text
-*.mdwn      text
-*.mdown     text
-*.mkd       text
-*.mkdn      text
-*.mdtxt     text
-*.mdtext    text
-*.txt       text
-AUTHORS     text
-CHANGELOG   text
-CHANGES     text
-CONTRIBUTING text
-COPYING     text
-copyright   text
-*COPYRIGHT* text
-INSTALL     text
-license     text
-LICENSE     text
-NEWS        text
-readme      text
-*README*    text
-TODO        text
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 範本引擎
+# Documentation / Plain Text
 # ──────────────────────────────────────────────────────────────────────────────
-*.ejs         text
-*.haml        text
-*.handlebars  text
-*.hbs         text
-*.hbt         text
-*.jade        text
-*.latte       text
-*.mustache    text
-*.njk         text
-*.phtml       text
-*.tmpl        text
-*.tpl         text
-*.twig        text
+*.markdown  text eol=lf
+*.md        text eol=lf
+*.mdwn      text eol=lf
+*.mdown     text eol=lf
+*.mkd       text eol=lf
+*.mkdn      text eol=lf
+*.mdtxt     text eol=lf
+*.mdtext    text eol=lf
+*.txt       text eol=lf
+
+AUTHORS        text eol=lf
+CHANGELOG      text eol=lf
+CHANGES        text eol=lf
+CONTRIBUTING   text eol=lf
+COPYING        text eol=lf
+copyright      text eol=lf
+*COPYRIGHT*    text eol=lf
+INSTALL        text eol=lf
+license        text eol=lf
+LICENSE        text eol=lf
+NEWS           text eol=lf
+readme         text eol=lf
+*README*       text eol=lf
+TODO           text eol=lf
+
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Microsoft Office / 文書格式
-# （*.dot 為 Word 範本，與上方範本引擎副檔名分開處理）
+# Template Engines
+# ──────────────────────────────────────────────────────────────────────────────
+*.ejs         text eol=lf
+*.haml        text eol=lf
+*.handlebars  text eol=lf
+*.hbs         text eol=lf
+*.hbt         text eol=lf
+*.jade        text eol=lf
+*.latte       text eol=lf
+*.mustache    text eol=lf
+*.njk         text eol=lf
+*.phtml       text eol=lf
+*.tmpl        text eol=lf
+*.tpl         text eol=lf
+*.twig        text eol=lf
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Microsoft Office
 # ──────────────────────────────────────────────────────────────────────────────
 *.doc   diff=astextplain
 *.DOC   diff=astextplain
@@ -60,282 +65,425 @@ TODO        text
 *.rtf   diff=astextplain
 *.RTF   diff=astextplain
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 原始碼
-# ──────────────────────────────────────────────────────────────────────────────
 
+# ──────────────────────────────────────────────────────────────────────────────
 # Web / CSS
-*.css   text diff=css
-*.scss  text diff=css
-*.sass  text
-*.less  text
-*.styl  text
+# ──────────────────────────────────────────────────────────────────────────────
+*.css    text eol=lf diff=css
+*.scss   text eol=lf diff=css
+*.sass   text eol=lf
+*.less   text eol=lf
+*.styl   text eol=lf
 
-# Web / HTML & 樣板
-*.htm    text diff=html
-*.html   text diff=html
-*.xhtml  text diff=html
-*.cshtml text diff=html
 
+# ──────────────────────────────────────────────────────────────────────────────
+# HTML / Templates
+# ──────────────────────────────────────────────────────────────────────────────
+*.htm      text eol=lf diff=html
+*.html     text eol=lf diff=html
+*.xhtml    text eol=lf diff=html
+*.cshtml   text eol=lf diff=html
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # JavaScript / TypeScript
-*.js    text
-*.mjs   text
-*.cjs   text
-*.jsx   text
-*.ts    text
-*.tsx   text
-*.coffee text
+# ──────────────────────────────────────────────────────────────────────────────
+*.js      text eol=lf
+*.mjs     text eol=lf
+*.cjs     text eol=lf
+*.jsx     text eol=lf
+*.ts      text eol=lf
+*.tsx     text eol=lf
+*.coffee  text eol=lf
 
+
+# ──────────────────────────────────────────────────────────────────────────────
 # PHP
-*.php  text
-*.inc  text
+# ──────────────────────────────────────────────────────────────────────────────
+*.php   text eol=lf
+*.inc   text eol=lf
 
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Python
-*.py   text
+# ──────────────────────────────────────────────────────────────────────────────
+*.py    text eol=lf
 
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Ruby
-*.rb   text
+# ──────────────────────────────────────────────────────────────────────────────
+*.rb    text eol=lf
 
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Shell
-*.sh   text eol=lf
+# ──────────────────────────────────────────────────────────────────────────────
+*.sh      text eol=lf
+*.bash    text eol=lf
+*.zsh     text eol=lf
 
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Perl
-*.pl   text
+# ──────────────────────────────────────────────────────────────────────────────
+*.pl    text eol=lf
 
-# PowerShell（在 Windows 上慣用 CRLF）
-*.ps1  text eol=crlf
 
-# Batch（必須 CRLF）
-*.bat  text eol=crlf
+# ──────────────────────────────────────────────────────────────────────────────
+# PowerShell
+# Windows native tooling expects CRLF
+# ──────────────────────────────────────────────────────────────────────────────
+*.ps1   text eol=crlf
 
-# Go（-text 跳過斷行轉換；Go 工具鏈自行處理）
-*.go   -text diff=golang
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Windows Batch
+# ──────────────────────────────────────────────────────────────────────────────
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Go
+# ──────────────────────────────────────────────────────────────────────────────
+*.go    text eol=lf diff=golang
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rust
+# ──────────────────────────────────────────────────────────────────────────────
+*.rs    text eol=lf
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # C / C++
-*.c     text diff=cpp
-*.cc    text diff=cpp
-*.cxx   text diff=cpp
-*.cpp   text diff=cpp
-*.cpi   text diff=cpp
-*.c++   text diff=cpp
-*.h     text diff=cpp
-*.hh    text diff=cpp
-*.hpp   text diff=cpp
-*.h++   text diff=cpp
+# ──────────────────────────────────────────────────────────────────────────────
+*.c      text eol=lf diff=cpp
+*.cc     text eol=lf diff=cpp
+*.cxx    text eol=lf diff=cpp
+*.cpp    text eol=lf diff=cpp
+*.cpi    text eol=lf diff=cpp
+*.c++    text eol=lf diff=cpp
 
+*.h      text eol=lf diff=cpp
+*.hh     text eol=lf diff=cpp
+*.hpp    text eol=lf diff=cpp
+*.hxx    text eol=lf diff=cpp
+*.h++    text eol=lf diff=cpp
+
+*.inl    text eol=lf diff=cpp
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # C#
-*.cs      text diff=csharp
-*.csx     text diff=csharp
+# ──────────────────────────────────────────────────────────────────────────────
+*.cs      text eol=crlf diff=csharp
+*.csx     text eol=crlf diff=csharp
 
-# Java / JVM 生態
-*.java        text diff=java
-*.kt          text diff=kotlin
-*.groovy      text diff=java
-*.scala       text diff=java
-*.gradle      text diff=java
-*.gradle.kts  text diff=kotlin
-*.jsp         text
-*.jspf        text
-*.jspx        text
-*.tld         text
-*.tag         text
-*.tagx        text
-*.properties  text
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Java / JVM
+# ──────────────────────────────────────────────────────────────────────────────
+*.java         text eol=lf diff=java
+*.kt           text eol=lf diff=kotlin
+*.kts          text eol=lf diff=kotlin
+*.groovy       text eol=lf diff=java
+*.scala        text eol=lf diff=java
+
+*.gradle       text eol=lf diff=java
+*.gradle.kts   text eol=lf diff=kotlin
+
+*.jsp          text eol=lf
+*.jspf         text eol=lf
+*.jspx         text eol=lf
+*.tld          text eol=lf
+*.tag          text eol=lf
+*.tagx         text eol=lf
+
+*.properties   text eol=lf
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # SQL
-*.sql  text
+# ──────────────────────────────────────────────────────────────────────────────
+*.sql   text eol=lf
 
-# XML / 通用標記
-*.xml  text
-*.xsl  text
-*.xsd  text
 
+# ──────────────────────────────────────────────────────────────────────────────
+# XML
+# ──────────────────────────────────────────────────────────────────────────────
+*.xml   text eol=lf
+*.xsl   text eol=lf
+*.xsd   text eol=lf
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # JSON / YAML / TOML
-*.json  text
-*.yaml  text
-*.yml   text
-*.toml  text
+# ──────────────────────────────────────────────────────────────────────────────
+*.json   text eol=lf
+*.yaml   text eol=lf
+*.yml    text eol=lf
+*.toml   text eol=lf
 
-# 鎖定檔（關閉 diff；大量自動產生的異動沒有閱讀價值）
-package-lock.json  text -diff
-yarn.lock          text -diff
-pnpm-lock.yaml     text -diff
-Gemfile.lock       text -diff
 
-# 環境變數
-*.env  text
+# ──────────────────────────────────────────────────────────────────────────────
+# Lock Files
+# Disable diff noise
+# ──────────────────────────────────────────────────────────────────────────────
+package-lock.json  text eol=lf -diff
+yarn.lock          text eol=lf -diff
+pnpm-lock.yaml     text eol=lf -diff
+Gemfile.lock       text eol=lf -diff
+Cargo.lock         text eol=lf -diff
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Environment Files
+# ──────────────────────────────────────────────────────────────────────────────
+*.env   text eol=lf
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # GraphQL
-*.graphql  text
-*.gql      text
+# ──────────────────────────────────────────────────────────────────────────────
+*.graphql   text eol=lf
+*.gql       text eol=lf
 
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Prisma
-*.prisma  text
+# ──────────────────────────────────────────────────────────────────────────────
+*.prisma    text eol=lf
+
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 設定 / 工具檔案
+# Config / Tooling
 # ──────────────────────────────────────────────────────────────────────────────
-.browserslistrc  text
-.bowerrc         text
-.editorconfig    text
-.eslintrc        text
-.csslintrc       text
-.jscsrc          text
-.jshintrc        text
-.jshintignore    text
-.stylelintrc     text
-.stylecop        text
-.gitattributes   text
-.gitconfig       text
-.gitignore       text
-.htaccess        text
-*.bowerrc        text
-*.cnf            text
-*.conf           text
-*.config         text
-*.dockerignore   text
-*.npmignore      text
-*.ini            text
-*.od             text
-*.onlydata       text
-*.scm            text
-browserslist     text
-Dockerfile       text
+.browserslistrc   text eol=lf
+.bowerrc          text eol=lf
+.editorconfig     text eol=lf
+.eslintrc         text eol=lf
+.csslintrc        text eol=lf
+.jscsrc           text eol=lf
+.jshintrc         text eol=lf
+.jshintignore     text eol=lf
+.stylelintrc      text eol=lf
+.stylecop         text eol=lf
+.gitattributes    text eol=lf
+.gitconfig        text eol=lf
+.gitignore        text eol=lf
+.htaccess         text eol=lf
 
-# Makefile（強制 LF；Windows 上的 make 也能讀取 LF）
+*.bowerrc         text eol=lf
+*.cnf             text eol=lf
+*.conf            text eol=lf
+*.config          text eol=lf
+*.dockerignore    text eol=lf
+*.npmignore       text eol=lf
+*.ini             text eol=lf
+*.od              text eol=lf
+*.onlydata        text eol=lf
+*.scm             text eol=lf
+
+browserslist      text eol=lf
+Dockerfile        text eol=lf
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Makefiles
+# ──────────────────────────────────────────────────────────────────────────────
 Makefile   text eol=lf
 makefile   text eol=lf
+GNUmakefile text eol=lf
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CMake
+# ──────────────────────────────────────────────────────────────────────────────
+CMakeLists.txt   text eol=lf
+*.cmake          text eol=lf
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Vim
-*.vim   text eol=lf
-.vimrc  text eol=lf
-.gvimrc text eol=lf
+# ──────────────────────────────────────────────────────────────────────────────
+*.vim    text eol=lf
+.vimrc   text eol=lf
+.gvimrc  text eol=lf
+
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Visual Studio / .NET 專案檔（強制 CRLF）
+# Visual Studio / .NET
 # ──────────────────────────────────────────────────────────────────────────────
-*.sln        text eol=crlf
-*.csproj     text eol=crlf
-*.vbproj     text eol=crlf
-*.vcxproj    text eol=crlf
-*.vcproj     text eol=crlf
-*.dbproj     text eol=crlf
-*.fsproj     text eol=crlf
-*.lsproj     text eol=crlf
-*.wixproj    text eol=crlf
-*.modelproj  text eol=crlf
-*.sqlproj    text eol=crlf
-*.wmaproj    text eol=crlf
-*.xproj      text eol=crlf
-*.props      text eol=crlf
-*.filters    text eol=crlf
-*.vcxitems   text eol=crlf
+*.sln         text eol=crlf
+*.csproj      text eol=crlf
+*.vbproj      text eol=crlf
+*.vcxproj     text eol=crlf
+*.vcproj      text eol=crlf
+*.dbproj      text eol=crlf
+*.fsproj      text eol=crlf
+*.lsproj      text eol=crlf
+*.wixproj     text eol=crlf
+*.modelproj   text eol=crlf
+*.sqlproj     text eol=crlf
+*.wmaproj     text eol=crlf
+*.xproj       text eol=crlf
+*.props       text eol=crlf
+*.filters     text eol=crlf
+*.vcxitems    text eol=crlf
+
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 建置工具包裝腳本
+# Build Tool Wrappers
 # ──────────────────────────────────────────────────────────────────────────────
-mvnw     text eol=lf
-gradlew  text eol=lf
+mvnw      text eol=lf
+gradlew   text eol=lf
+
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 二進位：圖像
+# Images
 # ──────────────────────────────────────────────────────────────────────────────
-*.ai    binary
-*.bmp   binary
-*.eps   binary
-*.gif   binary
-*.ico   binary
-*.jng   binary
-*.jp2   binary
-*.jpg   binary
-*.jpeg  binary
-*.jpx   binary
-*.jxr   binary
-*.png   binary
-*.psb   binary
-*.psd   binary
-# SVG 本質是 XML，但設計工具產出的 SVG 通常為單行大型檔案，
-# 保留 binary 可避免斷行轉換破壞檔案或產生無意義的 diff
-*.svg   binary
-*.svgz  binary
-*.tif   binary
-*.tiff  binary
-*.wbmp  binary
-*.webp  binary
+*.ai      binary
+*.bmp     binary
+*.eps     binary
+*.gif     binary
+*.ico     binary
+*.jng     binary
+*.jp2     binary
+*.jpg     binary
+*.jpeg    binary
+*.jpx     binary
+*.jxr     binary
+*.png     binary
+*.psb     binary
+*.psd     binary
+*.svg     binary
+*.svgz    binary
+*.tif     binary
+*.tiff    binary
+*.wbmp    binary
+*.webp    binary
 
-# PDF（二進位；diff=astextplain 與 binary 互斥，以 binary 為準）
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PDF
+# ──────────────────────────────────────────────────────────────────────────────
 *.pdf   binary
 *.PDF   binary
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 二進位：音訊
-# ──────────────────────────────────────────────────────────────────────────────
-*.kar   binary
-*.m4a   binary
-*.mid   binary
-*.midi  binary
-*.mp3   binary
-*.ogg   binary
-*.ra    binary
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 二進位：影片
+# Audio
 # ──────────────────────────────────────────────────────────────────────────────
-*.3gp   binary
-*.3gpp  binary
-*.asf   binary
-*.asx   binary
-*.fla   binary
-*.flv   binary
-*.m4v   binary
-*.mng   binary
-*.mov   binary
-*.mp4   binary
-*.mpeg  binary
-*.mpg   binary
-*.swc   binary
-*.swf   binary
-*.webm  binary
+*.kar    binary
+*.m4a    binary
+*.mid    binary
+*.midi   binary
+*.mp3    binary
+*.ogg    binary
+*.ra     binary
+
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 二進位：壓縮
+# Video
 # ──────────────────────────────────────────────────────────────────────────────
-*.7z   binary
-*.gz   binary
-*.rar  binary
-*.tar  binary
-*.zip  binary
+*.3gp    binary
+*.3gpp   binary
+*.asf    binary
+*.asx    binary
+*.fla    binary
+*.flv    binary
+*.m4v    binary
+*.mng    binary
+*.mov    binary
+*.mp4    binary
+*.mpeg   binary
+*.mpg    binary
+*.swc    binary
+*.swf    binary
+*.webm   binary
+
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 二進位：字型
+# Archives
 # ──────────────────────────────────────────────────────────────────────────────
-*.ttf    binary
-*.eot    binary
-*.otf    binary
-*.woff   binary
-*.woff2  binary
+*.7z    binary
+*.gz    binary
+*.rar   binary
+*.tar   binary
+*.zip   binary
+*.xz    binary
+*.bz2   binary
+
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 二進位：已編譯物件 / 函式庫 / 可執行檔
+# Fonts
 # ──────────────────────────────────────────────────────────────────────────────
-*.slo    binary
-*.lo     binary
-*.o      binary
-*.obj    binary
-*.gch    binary
-*.pch    binary
-*.so     binary
-*.dylib  binary
-*.dll    binary
-*.lai    binary
-*.la     binary
-*.a      binary
-*.lib    binary
-*.exe    binary
-*.out    binary
-*.app    binary
-*.class  binary
-*.ear    binary
-*.jar    binary
-*.war    binary
-*.jks    binary
+*.ttf     binary
+*.eot     binary
+*.otf     binary
+*.woff    binary
+*.woff2   binary
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Compiled Objects / Libraries / Executables
+# ──────────────────────────────────────────────────────────────────────────────
+*.slo      binary
+*.lo       binary
+*.o        binary
+*.obj      binary
+*.gch      binary
+*.pch      binary
+
+*.so       binary
+*.dylib    binary
+*.dll      binary
+
+*.lai      binary
+*.la       binary
+*.a        binary
+*.lib      binary
+
+*.exe      binary
+*.out      binary
+*.app      binary
+
+*.class    binary
+*.ear      binary
+*.jar      binary
+*.war      binary
+*.jks      binary
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LLVM / Embedded / Firmware
+# ──────────────────────────────────────────────────────────────────────────────
+*.elf    binary
+*.bin    binary
+*.hex    binary
+*.map    text eol=lf
+*.lst    text eol=lf
+*.dmp    binary
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Database
+# ──────────────────────────────────────────────────────────────────────────────
+*.db      binary
+*.sqlite  binary
+*.sqlite3 binary
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Logs
+# ──────────────────────────────────────────────────────────────────────────────
+*.log    text eol=lf
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Patch Files
+# ──────────────────────────────────────────────────────────────────────────────
+*.patch  text eol=lf
+*.diff   text eol=lf
