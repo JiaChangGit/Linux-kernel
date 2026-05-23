@@ -1,0 +1,2 @@
+host_requests,host_pages,nand_writes,nand_reads,nand_erases,gc_count,migrated_pages,wa,avg_latency_us,max_latency_us
+7,46,46,0,0,0,0,1.0000,4770,9140
