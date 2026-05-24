@@ -65,11 +65,11 @@ cat <<'EXPLAIN'
   PRODUCER flow (no syscall, no copy):
     shm->data[head] = msg;    ← write directly into shared page
     __sync_synchronize();     ← memory barrier
-    shm->head = next;
+    shm->head.value = next;
 
   CONSUMER flow (no syscall, no copy):
     msg = shm->data[tail];    ← read directly from shared page
-    shm->tail = (tail+1) % CAP;
+    shm->tail.value = (tail+1) % CAP;
 
   Zero extra copies.  Zero per-message syscalls.
 

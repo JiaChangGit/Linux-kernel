@@ -13,3 +13,6 @@ sudo dmesg | tail -3
 cd driver
 make clean
 cd ..
+cd userspace
+make clean
+cd ..

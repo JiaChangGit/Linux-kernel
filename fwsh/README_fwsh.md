@@ -103,6 +103,11 @@ cat < output.txt
 - 按下 `Ctrl+C`：`fwsh` 會清除當前輸入行並顯示新提示字元，而不會崩潰退出。
 - 執行背景指令：`sleep 10 &`。
 
+
+### 5. Leave
+- 按下 `Ctrl+D` 
+- `make clean` 
+
 ---
 
 ## 📌 未來擴充方向

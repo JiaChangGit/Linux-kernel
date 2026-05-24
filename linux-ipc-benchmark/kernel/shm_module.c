@@ -59,11 +59,12 @@ MODULE_VERSION("1.0");
  * Pad head/tail onto separate cache lines (64 B) so producer and consumer
  * don't cause false-sharing on the same cache line.
  */
-struct shm_region {
-    alignas(64) volatile uint32_t head;
+struct __attribute__((aligned(64))) shm_region {
+
+    volatile uint32_t head;
     uint8_t pad1[60];
 
-    alignas(64) volatile uint32_t tail;
+    volatile uint32_t tail;
     uint8_t pad2[60];
 
     uint32_t capacity;

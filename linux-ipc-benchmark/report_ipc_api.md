@@ -470,14 +470,14 @@ runtime producer
        -> while ring full: spin
        -> memcpy(shm->data[head], fill, MSG_SIZE)
        -> __sync_synchronize()
-       -> shm->head = next
+       -> shm->head.value = next
 
 runtime consumer
   -> mmap_worker()
        -> while ring empty: spin
        -> __sync_synchronize()
        -> memcpy(sink, shm->data[tail], MSG_SIZE)
-       -> shm->tail = (tail + 1) % capacity
+       -> shm->tail.value = (tail + 1) % capacity
 ```
 
 #### Cleanup Chain
@@ -718,7 +718,7 @@ main
   -> mmap /dev/shm_ipc
   -> run_test("Message Queue", mqfd, NULL, count, false)
   -> run_test("Shared Memory (syscall)", shmfd, NULL, count, false)
-  -> reset shm->head = shm->tail = 0
+  -> reset shm->head.value = shm->tail.value = 0
   -> run_test("Shared Memory (mmap)", shmfd, shm, count, true)
   -> system("cat /proc/mq_stats")
   -> system("cat /proc/shm_stats")
@@ -1097,7 +1097,7 @@ SHM mmap path 的效能差異主要來自每筆 message 避開 VFS syscall dispa
 
 # Direct Observation
 
-- mmap path 讓 user 直接寫 `shm->head`、`shm->tail` 與 `shm->data`。
+- mmap path 讓 user 直接寫 `shm->head.value`、`shm->tail.value` 與 `shm->data`。
 - `user/common.h:shm_region_t` 與 `kernel/shm_module.c:struct shm_region` 手動維持相同 layout。
 
 # Conservative Inference

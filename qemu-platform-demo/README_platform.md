@@ -26,7 +26,7 @@ qemu-platform-demo/
 ├── driver/            # 平台驅動原始碼 (核心邏輯、sysfs 實作)
 ├── dts/               # 裝置樹原始碼 (myled-fragment.dts) 與修補工具
 ├── rootfs/            # Rootfs 疊加層 (init 腳本、測試工具)
-├── scripts/           # 五大階段自動化腳本 (01-05)
+├── scripts/           # 自動化腳本 (01-06 + 0A)
 └── docs/              # 展示截圖
 ```
 
@@ -113,6 +113,13 @@ echo 00ffff > color
 # 檢查目前硬體狀態
 cat info
 ```
+### 步驟 4：Clean
+
+`bash ./scripts/06_clean.sh`
+
+##### Clean all
+
+`bash ./scripts/06_clean.sh --all`
 
 ---
 

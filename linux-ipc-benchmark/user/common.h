@@ -27,19 +27,23 @@
  * Full  : (head + 1) % RING_CAPACITY == tail
  */
 typedef struct {
-    alignas(64) volatile uint32_t head;
-    uint8_t pad1[64 - sizeof(uint32_t)];
+    volatile uint32_t value;
+    uint8_t padding[64 - sizeof(uint32_t)];
+} cacheline_u32_t;
 
-    alignas(64) volatile uint32_t tail;
-    uint8_t pad2[64 - sizeof(uint32_t)];
+typedef struct __attribute__((aligned(64))) {
 
-    alignas(64) uint32_t capacity;
-    uint32_t msg_size;
-    uint8_t pad3[64
-                 - sizeof(uint32_t)
-                 - sizeof(uint32_t)];
+    cacheline_u32_t head;
+    cacheline_u32_t tail;
+
+    struct {
+        uint32_t capacity;
+        uint32_t msg_size;
+        uint8_t padding[64 - 2 * sizeof(uint32_t)];
+    } meta;
 
     char data[RING_CAPACITY][MSG_SIZE];
+
 } shm_region_t;
 
 /* mmap size — must equal SHM_BUF_SIZE in shm_module.c */

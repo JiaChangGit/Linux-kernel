@@ -113,7 +113,7 @@ sudo ./test_app
 當您完成測試後，請執行卸載腳本：
 ```bash
 # 回到 chardev-driver 根目錄
-sudo ./scripts/unload.sh
+sudo bash ./scripts/unload.sh
 ```
 
 ---
