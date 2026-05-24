@@ -1,10 +1,10 @@
-# 科技業面試準備與專案技術導覽報告 (Linux Kernel / Embedded / Firmware)
+# 專案技術導覽報告 (Linux Kernel / Embedded / Firmware)
 
-本報告針對 Workspace 內的五大專案：`chardev-driver`、`cpu-scheduling-qemu`、`fwsh`、`linux-ipc-benchmark` 與 `qemu-platform-demo` 進行全方位的技術溯源與面試包裝。目標是協助應徵 **Linux Kernel**、**Embedded System**、**Firmware**、**System Software** 等職位。
+本報告針對 Workspace 內的六大專案：`chardev-driver`、`cpu-scheduling-qemu`、`fwsh`、`linux-ipc-benchmark`、`qemu-platform-demo` 與 `ssd-fw-sim` 進行全方位的技術溯源。
 
 ---
 
-# 1. 專案總覽（面試導向）(Project Overview)
+# 1. 專案總覽 (Project Overview)
 
 ### 核心能力指標 (Core Competencies)
 這份 Portfolio 展示了從「Bare-metal/Firmware 思維」到「Linux Kernel 內核開發」再到「系統效能分析」的全方位工程能力。
@@ -13,11 +13,12 @@
 - **核心機制與 VFS (Kernel Internals & VFS)**: `chardev-driver` 深入 VFS 層級，實作字元裝置、procfs 與 sysfs 介面，展現對核心 API 的熟練度。
 - **高效能通訊與同步 (High-Performance IPC & Sync)**: `linux-ipc-benchmark` 挑戰系統極限，實作 Zero-copy SHM 與 Lock-free 同步機制，展現對 CPU Cache 與 Memory Barrier 的理解。
 - **作業系統架構思維 (OS Architecture)**: `cpu-scheduling-qemu` 透過模擬多種排程演算法，展現對 OS 資源分配與狀態轉移的掌握。
-- **系統整合與工具鏈 (System Integration & Tools)**: `fwsh` 將複雜的 POSIX 行程模型轉化為可用的診斷工具，體現韌體開發中不可或缺的 Debug 工具開發能力。
+- **系統整合與工具鏈 (System Integration & Tools)**: `fwsh` 將複雜的 POSIX 行程模型轉化為可用的診斷工具，體現韌體開發中不可或缺認的 Debug 工具開發能力。
+- **快閃記憶體管理與韌體 (Flash Management & Firmware)**: `ssd-fw-sim` 展示了對 NVMe 協議與 FTL (Flash Translation Layer) 架構的深度理解，包含 L2P 映射、垃圾回收與寫入放大分析。
 
 ---
 
-# 2. 每個子專案的面試介紹與技術專題 (Project Deep Dives)
+# 2. 每個子專案的介紹與技術專題 (Project Deep Dives)
 
 ## A. qemu-platform-demo (Platform Driver & Device Tree)
 - **30 秒版本**: 「我實作了一個針對 ARM64 虛擬平台的 LED 控制器驅動。我編寫了 Device Tree Fragment 來定義硬體資源，並使用 `platform_driver` 架構與 `devm_` API 進行開發。專案的亮點在於我設計了『防禦性 Probe 機制』，當偵測到實體暫存器無回應時，會自動切換到模擬模式，確保系統在硬體開發初期也能持續運作。」
@@ -98,7 +99,7 @@
 - **未來演進**: 實作變長度的環形緩衝區分配演算法。
 
 ## C. fwsh (Custom Shell & System Diagnostics)
-- **30 秒版本**: 「我實作了一個具備韌體除錯能力的微型 Shell。它支援 Pipe、重導向與背景執行，並內建了 CRC32、Hexdump 與 `memmap` 工具，專為 Embedded 開發環境打造。」
+- **30 秒版本**: 「我實作了一個微型 Shell。它支援 Pipe、重導向與背景執行，並內建了 CRC32、Hexdump 與 `memmap` 工具，專為 Embedded 開發環境打造。」
 - **深入技術版**: 採用 `fork() -> pipe() -> dup2() -> execvp()` 流程實作管線。
 - **開發挑戰與除錯紀錄 (Bugs & Challenges)**:
     ### 【挑戰 1】管線死鎖與檔案描述符外洩 (Pipe Deadlock & FD Leak)
@@ -188,6 +189,43 @@
         - **公平性 (Fairness)**: 排程器確保所有行程都能按比例獲得 CPU 資源的能力。
 - **未來演進**: 引入紅黑樹模擬 Linux 的 CFS 排程器。
 
+## F. ssd-fw-sim (SSD Firmware & FTL Simulation)
+- **30 秒版本**: 「我實作了一個 SSD 韌體模擬器，完整模擬了 NVMe 佇列機制與 FTL (Flash Translation Layer) 的核心邏輯。專案支援頁級映射 (Page-level Mapping)、異地更新 (Out-of-place Update) 與基於貪婪演算法的垃圾回收 (Garbage Collection)。亮點在於我設計了一個精確的延遲模型，能量化不同 GC 策略對系統 IOPS 與寫入放大 (Write Amplification) 的影響。」
+- **深入技術版**:
+    - **專案目的**: 深入研究快閃記憶體 (NAND Flash) 的物理特性及其在儲存系統中的抽象層設計。
+    - **核心技術**: 實作了 **L2P (Logical to Physical) 映射表**，並透過 **垃圾回收 (GC)** 機制處理 NAND 無法覆寫 (Overwrite) 的限制。採用了單執行緒事件驅動模型來模擬 NVMe 的 Submission 與 Completion Queue。
+- **開發挑戰與除錯紀錄 (Bugs & Challenges)**:
+    ### 【挑戰 1】異地更新下的中繼資料一致性 (Metadata Consistency in Out-of-place Updates)
+    - **問題描述**: 在高併發模擬寫入時，偶爾會發生邏輯位址 (LBA) 讀取到舊資料或無效資料的情況。
+    - **技術根因**: 由於 NAND 必須「先抹除再寫入」，所有更新都是 **異地更新 (Out-of-place Update)**。若在更新映射表 (L2P Table) 前發生異常，或是更新順序錯誤（先標記舊頁面無效，再寫入新頁面並更新映射），會導致資料丟失。
+    - **回答 (Perfect Solution)**:
+        「我確立了嚴格的 **寫入原子操作順序**：1. 配置新實體頁面 (PPA)；2. 寫入資料至 NAND；3. 更新 L2P 映射表；4. 將舊 PPA 標記為無效。這模仿了實體韌體中為了應對掉電保護 (Power-Loss Protection) 所設計的日誌化 (Journaling) 思維，確保了任何時刻 L2P 表指向的都是已完成寫入的有效資料。」
+    - **關鍵字解析**:
+        - **異地更新 (Out-of-place Update)**: 為了應對 NAND 物理限制，不直接在原位更新資料，而是將新資料寫入新位置並更新索引。
+        - **映射表 (Mapping Table / L2P)**: 記錄使用者邏輯區段號碼 (LPN) 與實體頁面位址 (PPA) 對應關係的表格。
+
+    ### 【挑戰 2】垃圾回收 (GC) 引發的長尾延遲 (Long-tail Latency)
+    - **問題描述**: 模擬器在磁碟接近滿額 (Full Disk) 時，寫入延遲會突然飆升，導致測試數據出現極端離群值。
+    - **技術根因**: 當可用區塊 (Free Blocks) 低於臨界值時，觸發了 **垃圾回收 (Garbage Collection)**。遷移有效頁面 (Valid Page Migration) 與區塊抹除 (Block Erase) 的時間遠大於正常寫入，造成了「停頓」現象。
+    - **回答 (Perfect Solution)**:
+        「這是典型的 **寫入放大 (Write Amplification)** 與延遲效能折衷問題。我採用了 **貪婪策略 (Greedy Policy)**：優先挑選無效頁面最多的區塊進行回收，以極小化遷移成本。同時，我引入了 **預留空間 (Over-Provisioning, OP)** 的參數配置。實驗證明，當 OP 從 7% 提升至 20% 時，GC 頻率顯著下降，寫入放大比從 3.5 降至 1.8，大幅改善了長尾延遲表現。」
+    - **關鍵字解析**:
+        - **垃圾回收 (Garbage Collection, GC)**: 搬移區塊中的有效資料並將整塊抹除以釋放空間的過程。
+        - **寫入放大 (Write Amplification, WA)**: 實際寫入 NAND 的資料量與主機請求寫入量之比例，是衡量 SSD 壽命與效能的關鍵指標。
+        - **預留空間 (Over-Provisioning, OP)**: 額外保留的 NAND 空間，不對使用者開放，用於加速 GC 與存儲中繼資料。
+
+    ### 【挑戰 3】NAND 狀態機的嚴謹性驗證
+    - **問題描述**: 測試中偶爾會出現對已抹除 (Erased) 頁面進行「無效化 (Invalidate)」的操作，導致模擬器狀態崩潰。
+    - **技術根因**: FTL 的區塊管理員 (Block Manager) 與 GC 邏輯在資源回收時存在競態或邏輯漏洞，導致同一個實體頁面被重複回收。
+    - **回答 (Perfect Solution)**:
+        「我為每個實體頁面設計了嚴格的 **狀態轉移模型 (NAND State Machine)**：`FREE` -> `VALID` -> `INVALID` -> `FREE`。任何非法路徑（例如從 `FREE` 直接到 `INVALID`）都會觸發斷言 (Assertion)。透過這種防禦性設計，我定位到了 GC 在清空 Victim Block 時未同步清理 L2P 快取的問題。這讓我深刻理解到韌體開發中『狀態機完整性』對穩定性的重要性。」
+    - **關鍵字解析**:
+        - **抹除區塊 (Block Erase)**: NAND Flash 的最小抹除單位，通常包含數百個頁面。
+        - **物理頁面地址 (Physical Page Address, PPA)**: NAND 快閃記憶體中資料存放的實體座標。
+
+- **心得**: SSD 韌體是一場空間（映射表大小）、時間（延遲）與壽命（寫入放大）的博弈。
+- **未來演進**: 實作磨損均衡 (Wear Leveling) 與多通道 (Multi-channel) 並行模擬。
+
 ---
 
 # 3. 可能會問的問題 (Q&A)
@@ -197,6 +235,8 @@
     - **回答**: 為了分離硬體描述（位址、中斷）與軟體邏輯。同樣的驅動可以支援不同位址的硬體，且支援 Hotplug 與動態電源管理。
 - **Q: 在 `fwsh` 裡面，為什麼 `cd` 要做成內建指令？**
     - **回答**: 因為工作目錄是每個行程私有的。如果在子行程執行 `cd`，只有子行程會切換，父行程 (Shell) 不受影響。
+- **Q: 什麼是 FTL 中的「頁級映射」與「區塊級映射」？**
+    - **回答**: 頁級映射以 Page (如 4KB) 為單位，靈活性高但映射表極大 (DRAM 需求高)；區塊級映射以 Block (如 4MB) 為單位，表小但會造成嚴重的寫入放大。現代 SSD 多採用 Hybrid 或頁級映射。
 
 ### 同步與並發題
 - **Q: 為什麼在 `chardev.c` 用 `mutex`，但在 `myled_ctrl.c` 用 `spinlock`？**
@@ -209,6 +249,8 @@
     - **回答**: 多核心修改同一 Cache Line 的不同變數導致頻繁失效。我在指標間加入 60 bytes Padding 解決此問題。
 - **Q: 為什麼 mmap 比 read/write 快？**
     - **回答**: `read/write` 需要兩次拷貝且頻繁進入系統呼叫。`mmap` 則是建立頁表映射，實現零拷貝與零系統呼叫。
+- **Q: 什麼是 SSD 的寫入放大 (Write Amplification)？如何優化？**
+    - **回答**: 指實際寫入快閃記憶體的資料量除以主機要求寫入的資料量。優化方式包含增加 Over-Provisioning 空間、實作 Trim 指令，以及使用更聰明的 GC 演算法（如分層回收）。
 
 ---
 
@@ -219,7 +261,9 @@
 - **追問: 如果在 `probe` 中 `request_mem_region` 失敗，通常代表什麼？**
     - **回答**: 代表該位址範圍已被其他驅動佔用，存在資源衝突。
 - **追問: 如果核心模組造成系統死機 (Freeze)，你會如何 Debug？**
-    - **回答**: 檢查是否有「在 Spinlock 保護區內呼叫了會睡眠的函式」。觀察 `dmesg -w` 或透過 `sysrq` 觸發 Dump 分析 Call Trace。
+    - **回答**: 檢查是否有「在 Spinlock 保護區內呼叫了會睡眠的函式」。觀察 `dmesg -w` 或透過 `sysrq` 觸發 Dump 分析 Call Trace.
+- **追問: NAND Flash 為什麼不能直接覆寫 (In-place Overwrite)？**
+    - **回答**: 因為 NAND 的物理結構限制。寫入前必須先將 Cell 內部的電荷排空（即 Erase 動作），而抹除是以 Block 為單位，寫入則是以 Page 為單位。
 
 ---
 
@@ -228,6 +272,7 @@
 1. **防禦性設計 (Robustness)**: 在 `qemu-platform-demo` 中實作硬體檢測，當暫存器回傳 `0xFFFFFFFF` 時自動切換模擬模式，展現對硬體整合風險的預判。
 2. **架構思維 (Architecture)**: 在 `linux-ipc-benchmark` 中處理 Cache Line 對齊，展示對 CPU 微架構與 MESI 協定的深刻理解。
 3. **系統完整性 (Integrity)**: 在 `fwsh` 中處理管線 FD 管理，展現對 POSIX 資源生命週期的嚴謹控制。
+4. **複雜狀態建模 (State Modeling)**: 在 `ssd-fw-sim` 中實作 FTL 狀態機與延遲量化模型，展現對大規模儲存系統底層邏輯的精確掌控。
 
 ---
 
@@ -236,6 +281,7 @@
 - **`remap_pfn_range` (PFN 映射)**: 將核心物理頁框號映射至使用者虛擬位址的核心 API。映射長度必須是 **PAGE_SIZE (4KB)** 的倍數。
 - **Memory Barrier (屏障)**: 防止 CPU 亂序執行。`smp_wmb()` 確保生產者寫完資料才更新指標。與 `volatile` 不同，屏障解決的是硬體執行順序，而 `volatile` 解決的是編譯器優化。
 - **`devm_kzalloc` (託管記憶體)**: 具備生命週期管理的配置。核心會自動追蹤資源，在驅動卸載時釋放，徹底避免 Memory Leak。
+- **FTL (Flash Translation Layer)**: 實作於 SSD 韌體中的抽象層。其核心任務是透過映射表讓「無法覆寫、會損耗」的快閃記憶體在作業系統眼中看起來就像一塊「可隨機存取、無損耗」的傳統磁碟。
 
 ---
 
@@ -262,11 +308,17 @@
 | **快取一致性協定** | **MESI Protocol** | 硬體層級確保多核快取資料同步的協定 (Modified, Exclusive, Shared, Invalid)。 |
 | **轉換後備緩衝器** | **TLB (Translation Lookaside Buffer)** | MMU 內部的頁表快取，用於加速虛擬到位址的轉換。 |
 | **即時作業系統** | **RTOS (Real-Time OS)** | 強調任務執行時間的確定性與極短中斷響應時間的作業系統。 |
+| **快閃記憶體轉換層** | **FTL (Flash Translation Layer)** | 負責邏輯到位元址映射、垃圾回收與損耗均衡的韌體軟體層。 |
+| **垃圾回收** | **GC (Garbage Collection)** | 搬移有效頁面並釋放無效區塊的過程。 |
+| **寫入放大** | **WA (Write Amplification)** | 實際寫入 NAND 的資料量與主機請求量之比值，影響 SSD 壽命。 |
+| **異地更新** | **Out-of-place Update** | 不直接在舊資料位置覆寫，而是寫入新位置並更新映射指標。 |
+| **磨損均衡** | **Wear Leveling** | 確保所有 NAND 區塊的抹除次數平均，以延長 SSD 整體壽命的技術。 |
+| **預留空間** | **Over-Provisioning (OP)** | SSD 中未開放給使用者的隱藏容量，用於提高 GC 效率。 |
 
 ---
 
 # 8. 總結 (Summary)
 
-這份報告涵蓋了從硬體驅動、行程管理到高效能 IPC 的全方位技術。每個專案不僅解決了特定問題，更體現了對 Linux 核心核心原則的掌握：**「資源託管、安全檢查、同步保護與效能優化」**。透過這些專案的實作，我建立了一套從底層到應用層的完整技術體系，能勝任極具挑戰性的系統開發任務。
+這份報告涵蓋了從硬體驅動、行程管理、高效能 IPC 到快閃記憶體管理的全方位技術。每個專案不僅解決了特定問題，更體現了對系統核心原則的掌握：**「資源託管、安全檢查、同步保護、效能優化與底層儲存抽象」**。透過這六個專案的實作，我建立了一套從底層硬體到中介層韌體再到作業系統核心的完整技術體系，展現了處理複雜嵌入式與系統級任務的專業能力。
 
-分析來源：`/home/user/Linux-kernel`
+分析來源：`./Linux-kernel`

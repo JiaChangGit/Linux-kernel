@@ -44,7 +44,7 @@ sudo apt install -y gcc-aarch64-linux-gnu
 
 ---
 
-## 子專題一：`ssd-fw-sim`（無需 root）
+## 子專題一：`ssd-fw-sim`
 
 模擬 host trace 驅動的寫入路徑：NVMe 提交/完成佇列、內部 request queue、FTL 映射、NAND 頁狀態、greedy GC、延遲統計。
 
@@ -84,7 +84,7 @@ make test
 
 ---
 
-## 子專題二：`chardev-driver`（需 root）
+## 子專題二：`chardev-driver`
 
 字元裝置 `/dev/chardev0`：read/write/ioctl，以及 `/proc/chardev_info`、`/sys/class/chardev/chardev0/*`。
 
@@ -145,7 +145,7 @@ sudo ./scripts/unload.sh
 
 ---
 
-## 子專題三：`linux-ipc-benchmark`（需 root）
+## 子專題三：`linux-ipc-benchmark`
 
 兩個模組：`mq_module.ko`（`/dev/mq_ipc`）、`shm_module.ko`（`/dev/shm_ipc`）。使用者程式 `benchmark` 對照三種路徑（MQ syscall、SHM syscall、SHM mmap）。
 
