@@ -192,7 +192,7 @@ else
     echo "  bash scripts/04_build_rootfs.sh"
     echo "  bash scripts/05_run_qemu.sh"
     echo "  bash scripts/07_fix_busybox_arch.sh"
-    echo "  07 => for kernel 是 ARM64，busybox 是 x86-64，kernel 無法執行 /bin/sh，所以 init 直接失敗。"
-    echo "  07-> 03-> 04-> 05"
+    echo "  0A => for kernel 是 ARM64，busybox 是 x86-64，kernel 無法執行 /bin/sh，所以 init 直接失敗。"
+    echo "  0A-> 03-> 04-> 05"
 fi
 echo ""

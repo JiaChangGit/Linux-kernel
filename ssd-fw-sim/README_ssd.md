@@ -114,6 +114,12 @@ Optional config override:
 ./ssd_fw_sim --config ssd.conf traces/sample.trace
 ```
 
+Clean:
+
+```bash
+make clean
+```
+
 Config file rules:
 
 - `gc_free_block_threshold` must be between `1` and `total_blocks - 1`

@@ -63,6 +63,10 @@ bash scripts/01_build_kernel.sh
 bash scripts/02_patch_dtb.sh
 ```
 
+```bash
+bash scripts/0A_fix_busybox_arch.sh
+```
+
 ### 階段 3：編譯平台驅動
 使用階段 1 產出的核心標頭檔 (Headers) 編譯 `myled_ctrl.ko` 核心模組。
 ```bash
@@ -71,6 +75,7 @@ bash scripts/03_build_driver.sh
 
 ### 階段 4：封裝 Rootfs
 將 BusyBox 二進位檔、自定義 `init` 行程、測試腳本與驅動程式封裝成 `initramfs.cpio.gz`。
+
 ```bash
 bash scripts/04_build_rootfs.sh
 ```
@@ -92,6 +97,25 @@ bash scripts/05_run_qemu.sh
 ```bash
 # 在 QEMU 終端機執行
 /test_myled.sh
+```
+
+If failed
+
+```bash
+# check 目前 MMIO 使用情況
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+cat /proc/iomem
+# 若看到：
+# 09000000-09000fff : 9000000.pl011
+# 那就不要用： reg = <0x0 0x09000000 0x0 0x1000>;
+# 否則兩個 driver 都會 claim 同一段 resource否則兩個 driver 都會 claim 同一段 resource
+
+# on virtual box (ubuntu, not qemu)
+# (./Linux-kernel/qemu-platform-demo/dts)
+dtc -@ -I dts -O dtb -o myled.dtbo myled-fragment.dts
+fdtoverlay -i qemu-virt-base.dtb -o qemu-virt-myled.dtb myled.dtbo
 ```
 此腳本會自動載入模組，並測試所有的 sysfs 節點。
 
