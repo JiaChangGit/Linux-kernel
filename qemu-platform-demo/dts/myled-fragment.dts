@@ -2,7 +2,7 @@
  * myled-fragment.dts
  *
  * Fragment to be merged into the QEMU ARM64 virt machine DTB.
- * The node registers a virtual LED controller at MMIO 0x10010000.
+ * The node registers a virtual LED controller at MMIO 0x0d000000.
  *
  * Properties demonstrated:
  *   - compatible  : triggers OF match in the driver
@@ -23,13 +23,34 @@
         target-path = "/";
 
         __overlay__ {
-            myled: myled-controller@10010000 {
-                compatible        = "myvendor,myled-v1";
-                reg               = <0x0 0x10010000 0x0 0x1000>;
-                num-leds          = <4>;
-                label             = "demo-rgb-led";
+
+            /*
+            * myled platform device
+            * mapped to MMIO region 0x0d000000
+            * size: 0x1000 (4KB register space)
+            */
+            myled: myled-controller@0d000000 {
+
+                /* Driver binding key (must match of_match_table) */
+                compatible = "myvendor,myled-v1";
+
+                /*
+                * Physical MMIO region
+                * [base address, size]
+                */
+                reg = <0x0 0x0d000000 0x0 0x1000>;
+
+                /* Number of LEDs controlled by this device */
+                num-leds = <4>;
+
+                /* Human readable label */
+                label = "demo-rgb-led";
+
+                /* Default brightness at boot */
                 default-brightness = <180>;
-                status            = "okay";
+
+                /* Enable device */
+                status = "okay";
             };
         };
     };

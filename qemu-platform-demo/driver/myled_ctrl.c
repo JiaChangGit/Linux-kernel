@@ -32,18 +32,28 @@
  *  Low-level register helpers
  * ================================================================ */
 
-static u32 myled_reg_read(struct myled_priv* priv, u32 off) {
-  unsigned long flags;
-  u32 val;
+static u32 myled_reg_read(struct myled_priv *priv, u32 off)
+{
+    u32 val;
 
-  spin_lock_irqsave(&priv->lock, flags);
-  if (priv->simulated)
-    val = priv->sim_regs[off / 4];
-  else
-    val = readl(priv->base + off);
-  spin_unlock_irqrestore(&priv->lock, flags);
+    if (!priv || !priv->base)
+        return 0;
 
-  return val;
+    if (off >= MYLED_REG_SIZE)
+        return 0;
+
+    spin_lock(&priv->lock);
+
+    if (priv->simulated) {
+        val = priv->sim_regs[off / 4];
+    } else {
+        void __iomem *addr = priv->base + off;
+        val = readl(addr);
+    }
+
+    spin_unlock(&priv->lock);
+
+    return val;
 }
 
 static void myled_reg_write(struct myled_priv* priv, u32 off, u32 val) {

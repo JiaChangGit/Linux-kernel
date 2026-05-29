@@ -13,7 +13,7 @@
 ## 💡 專案特色
 
 - **全自動化工具鏈**：一鍵下載並交叉編譯 Linux 6.6.30 核心，適配 ARM64 架構。
-- **動態裝置樹注入 (DTS Overlay)**：利用 `fdtoverlay` 將虛擬硬體定義 (0x10010000 區段) 直接注入 QEMU 的執行時期位址空間。
+- **動態裝置樹注入 (DTS Overlay)**：利用 `fdtoverlay` 將虛擬硬體定義 (0x0d000000 區段) 直接注入 QEMU 的執行時期位址空間。
 - **完善的驅動生命週期**：完整實作 `probe`、`remove`、`suspend` 與 `resume` 回標函式 (Callbacks)。
 - **精簡的 Initramfs 佈署**：使用 BusyBox 構建極小化的啟動環境，確保實驗環境的純淨度。
 
@@ -123,7 +123,7 @@ fdtoverlay -i qemu-virt-base.dtb -o qemu-virt-myled.dtb myled.dtbo
 您也可以手動操作 sysfs 來控制虛擬 LED：
 ```bash
 # 切換到裝置目錄 (位址會因 DT 定義而定)
-cd /sys/bus/platform/devices/10010000.myled-controller/myled/
+cd /sys/bus/platform/devices/0d000000.myled-controller/myled/
 
 # 開啟 LED
 echo 1 > enable

@@ -20,7 +20,7 @@
 
 專案由四個層次緊密結合而成：
 
-1.  **硬體定義層 (DTS)**：`myled-fragment.dts` 定義了虛擬硬體的基地位址 (0x10010000) 與相容性字串 (`myvendor,myled-v1`)。
+1.  **硬體定義層 (DTS)**：`myled-fragment.dts` 定義了虛擬硬體的基地位址 (0x0d000000) 與相容性字串 (`myvendor,myled-v1`)。
 2.  **核心驅動層 (Driver)**：`myled_ctrl.c` 實作了平台驅動邏輯。
 3.  **系統模擬層 (QEMU)**：使用 ARM64 Virt 機器模擬處理器環境，並透過腳本將 DTS 注入執行時期。
 4.  **驗證層 (Rootfs)**：基於 BusyBox 的 Initramfs，包含自動化測試腳本。
@@ -33,7 +33,7 @@
 
 ### 1. 初始化與匹配流程 (Matching Flow)
 當 QEMU 載入 DTB 並啟動核心後：
--   核心解析裝置樹，發現節點 `myled-controller@10010000` 帶有 `compatible = "myvendor,myled-v1"`。
+-   核心解析裝置樹，發現節點 `myled-controller@0d000000` 帶有 `compatible = "myvendor,myled-v1"`。
 -   驅動程式載入時呼叫 `module_platform_driver(myled_driver)`，向系統註冊 `platform_driver` 結構。
 -   **匹配機制**：Platform Bus 掃描裝置樹節點，發現與 `myled_of_match` 表中的相容性字串匹配。
 -   **觸發 Probe**：系統自動呼叫 `myled_probe(struct platform_device *pdev)`。
@@ -42,7 +42,7 @@
 進入 `myled_probe` 後的具體動作：
 -   **私有資料配置**：呼叫 `devm_kzalloc` 分配 `struct myled_priv`，並將其連結至裝置。
 -   **資源取得**：呼叫 `platform_get_resource` 取得 DTS 中定義的 `reg` (MMIO 位址區間)。
--   **位址映射**：呼叫 `devm_ioremap_resource` 將實體位址 0x10010000 映射為核心虛擬位址 `priv->base`。
+-   **位址映射**：呼叫 `devm_ioremap_resource` 將實體位址 0x0d000000 映射為核心虛擬位址 `priv->base`。
 -   **硬體初始化**：呼叫 `myled_hw_init`。此函式會讀取版本暫存器，若回傳 `0xFFFFFFFF` (代表無硬體回應)，則將 `priv->simulated` 設為 true，啟動模擬模式。
 -   **介面建立**：呼叫 `sysfs_create_group` 在 `/sys/bus/platform/devices/.../myled/` 下建立屬性節點。
 
@@ -84,7 +84,7 @@
 ## 六、 開發挑戰與除錯紀錄
 
 1.  **位址衝突問題**：
-    在選擇虛擬 LED 的 MMIO 位址時，曾因與 QEMU 的 PL011 UART 區段衝突導致核心崩潰。透過檢查 `/proc/iomem` 與 QEMU 原始碼，最終選定 `0x10010000` 作為安全位址。
+    在選擇虛擬 LED 的 MMIO 位址時，曾因與 QEMU 的 PL011 UART 區段衝突導致核心崩潰。透過檢查 `/proc/iomem` 與 QEMU 原始碼，最終選定 `0x0d000000` 作為安全位址。
 2.  **BusyBox 架構匹配**：
     由於核心為 64 位元，Initramfs 中的 BusyBox 必須是 ARM64 版本。專案中提供了 `scripts/0A_fix_busybox_arch.sh` 輔助處理環境差異。
 3.  **DTS 符號缺失**：

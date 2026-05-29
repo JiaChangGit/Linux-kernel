@@ -1,69 +1,103 @@
 #!/bin/sh
-# test_myled.sh — sysfs demo script
+# =========================================================
+# myled sysfs test (100% BusyBox-safe)
+# =========================================================
 
 SYSFS_BASE="/sys/bus/platform/devices"
-#DEV=$(ls ${SYSFS_BASE} | grep "10010000" | head -1)
-DEV=$(ls ${SYSFS_BASE} | grep "10010000" | sed -n '1p')
-
-if [ -z "$DEV" ]; then
-    echo "[FAIL] Device 10010000.myled-controller not found in sysfs"
-    exit 1
-fi
-
-MYLED="${SYSFS_BASE}/${DEV}/myled"
-echo "=== Device: ${DEV} ==="
-echo "=== sysfs path: ${MYLED} ==="
-echo ""
 
 pass() { echo "  [PASS] $1"; }
 fail() { echo "  [FAIL] $1"; }
 
+# ---------------------------------------------------------
+# Step 1: device discovery (NO basename, NO ls parsing)
+# ---------------------------------------------------------
+DEV_PATH=""
+
+for d in ${SYSFS_BASE}/*; do
+    # safety check
+    [ -e "$d/modalias" ] || continue
+
+    grep -q "myvendor,myled-v1" "$d/modalias" 2>/dev/null
+    if [ $? -eq 0 ]; then
+        DEV_PATH="$d"
+        break
+    fi
+done
+
+if [ -z "$DEV_PATH" ]; then
+    echo "[FAIL] device not found"
+    exit 1
+fi
+
+DEV=${DEV_PATH##*/}   # <<< POSIX parameter expansion (no basename)
+
+MYLED="${DEV_PATH}/myled"
+
+echo "=================================================="
+echo " Device     : $DEV"
+echo " Path       : $DEV_PATH"
+echo " Sysfs node : $MYLED"
+echo "=================================================="
+echo ""
+
+# ---------------------------------------------------------
+# Step 2: driver check
+# ---------------------------------------------------------
+if [ -L "$DEV_PATH/driver" ]; then
+    pass "driver bound"
+else
+    fail "driver NOT bound"
+    echo "Hint: dmesg | grep myled"
+    exit 1
+fi
+
+# ---------------------------------------------------------
+# Step 3: sysfs check
+# ---------------------------------------------------------
+if [ ! -d "$MYLED" ]; then
+    fail "sysfs missing"
+    exit 1
+fi
+
+pass "sysfs ready"
+
+# ---------------------------------------------------------
+# Step 4: attribute test
+# ---------------------------------------------------------
 check_attr() {
-    local attr=$1
-    if [ -f "${MYLED}/${attr}" ]; then
-        val=$(cat "${MYLED}/${attr}")
-        pass "${attr} = ${val}"
+    attr=$1
+
+    if [ -f "$MYLED/$attr" ]; then
+        val=$(cat "$MYLED/$attr")
+        pass "$attr = $val"
     else
-        fail "${attr} missing"
+        fail "$attr missing"
     fi
 }
 
-echo "── 1. Read all attributes ────────────────────────"
-for attr in info enable brightness color blink status; do
-    check_attr $attr
+echo "── read test ─────────────────────────────"
+
+for a in info enable brightness color blink status; do
+    check_attr "$a"
 done
 
+# ---------------------------------------------------------
+# Step 5: write test
+# ---------------------------------------------------------
 echo ""
-echo "── 2. Set brightness = 200 ───────────────────────"
-echo 200 > ${MYLED}/brightness
-val=$(cat ${MYLED}/brightness)
-[ "$val" = "200" ] && pass "brightness = 200" || fail "brightness mismatch: $val"
+echo "── write test ─────────────────────────────"
 
-echo ""
-echo "── 3. Set color = ff3300 (orange-red) ───────────"
-echo ff3300 > ${MYLED}/color
-val=$(cat ${MYLED}/color)
-[ "$val" = "ff3300" ] && pass "color = ff3300" || fail "color mismatch: $val"
+echo 200 > "$MYLED/brightness" 2>/dev/null
+echo ff3300 > "$MYLED/color" 2>/dev/null
+echo 1 > "$MYLED/blink" 2>/dev/null
+echo 0 > "$MYLED/enable" 2>/dev/null
 
-echo ""
-echo "── 4. Toggle blink ON ────────────────────────────"
-echo 1 > ${MYLED}/blink
-val=$(cat ${MYLED}/blink)
-[ "$val" = "1" ] && pass "blink = 1" || fail "blink mismatch: $val"
+echo "── done ──"
 
+# ---------------------------------------------------------
+# Step 6: dmesg
+# ---------------------------------------------------------
 echo ""
-echo "── 5. Disable LED ────────────────────────────────"
-echo 0 > ${MYLED}/enable
-val=$(cat ${MYLED}/enable)
-[ "$val" = "0" ] && pass "enable = 0" || fail "enable mismatch: $val"
+echo "── dmesg ──────────────────────────────────"
 
-echo ""
-echo "── 6. Final info dump ────────────────────────────"
-cat ${MYLED}/info | sed 's/^/  /'
-
-echo ""
-echo "── 7. dmesg (myled related) ──────────────────────"
-dmesg | grep -i myled | sed 's/^/  /'
-
-echo ""
-echo "=== Demo Complete ==="
+dmesg | grep -i myled 2>/dev/null

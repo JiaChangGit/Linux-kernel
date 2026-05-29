@@ -29,10 +29,9 @@ FTL (L2P, out-of-place update)
 NAND Simulator
    |
    v
-Statistics / Latency Model
-   |
-   v
 NVMe Completion Queue
+   |
+   +--> Statistics / Latency Accounting
    |
    v
 Host Completion Reap

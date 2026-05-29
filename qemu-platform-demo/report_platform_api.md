@@ -23,11 +23,11 @@
 | source file | `driver/myled_ctrl.c` | Linux platform driver 主體，包含 register helper、hardware init/shutdown、sysfs attributes、probe/remove、PM callback、OF match table 與 module registration。 |
 | header file | `driver/myled_ctrl.h` | 定義 register offset、bit mask、限制值、hardware version、simulated register count 與 `struct myled_priv`。 |
 | build system | `driver/Makefile` | out-of-tree kernel module build，`obj-m := myled_ctrl.o`，並提供 `install` target 複製 `.ko` 到 `rootfs/overlay/`。 |
-| hardware description | `dts/myled-fragment.dts` | DT overlay fragment，建立 `myled-controller@10010000` node，宣告 `compatible`、`reg`、`num-leds`、`label`、`default-brightness`、`status`。 |
+| hardware description | `dts/myled-fragment.dts` | DT overlay fragment，建立 `myled-controller@0d000000` node，宣告 `compatible`、`reg`、`num-leds`、`label`、`default-brightness`、`status`。 |
 | DTB script | `dts/patch_dtb.sh`、`scripts/02_patch_dtb.sh` | dump QEMU virt base DTB，編譯 overlay DTBO，再用 `fdtoverlay` 合併成 `qemu-virt-myled.dtb`。 |
 | build/run scripts | `scripts/00_install_deps.sh`、`01_build_kernel.sh`、`03_build_driver.sh`、`04_build_rootfs.sh`、`05_run_qemu.sh`、`06_clean.sh` | 安裝依賴、下載/建置 kernel、建置 module、打包 initramfs、啟動 QEMU、清理產物。 |
 | rootfs overlay | `rootfs/overlay/init` | QEMU initramfs 的 `/init`，mount proc/sys/dev，`insmod /myled_ctrl.ko`，執行 `/test_myled.sh`，最後 drop to shell。 |
-| rootfs test | `rootfs/overlay/test_myled.sh` | 從 `/sys/bus/platform/devices` 找到包含 `10010000` 的 device，讀寫 `myled` sysfs attribute。 |
+| rootfs test | `rootfs/overlay/test_myled.sh` | 從 `/sys/bus/platform/devices` 找到包含 `0d000000` 的 device，讀寫 `myled` sysfs attribute。 |
 | docs | `docs/*.png` | build/demo 截圖。此報告未以圖片內容推導 driver 行為。 |
 | README/report | `README_platform.md`、`report_platform.md` | 說明性文件，僅作低優先級佐證。 |
 
@@ -131,7 +131,7 @@ scripts/05_run_qemu.sh
 | `spin_lock_init` | synchronization init | 呼叫於 `driver/myled_ctrl.c:317` | `myled_probe` | 初始化 `priv->lock` | `spinlock_t lock` | register helper 可安全進入 lock/unlock path。 |
 | `of_property_read_u32` | OF property API | 呼叫於 `driver/myled_ctrl.c:320`、`123` | `myled_probe`、`myled_hw_init` | 讀 `num-leds` 與 `default-brightness` | DT node | `num-leds` 缺失時 fallback 1；`default-brightness` 缺失時 fallback 128。 |
 | `of_property_read_string` | OF property API | 呼叫於 `driver/myled_ctrl.c:328` | `myled_probe` | 讀 `label` 並印 log | DT node | 不影響 state；只作 log。 |
-| `platform_get_resource` | platform resource API | 呼叫於 `driver/myled_ctrl.c:332` | `myled_probe` | 取得 MEM resource | `reg = <0x0 0x10010000 0x0 0x1000>` | 若無 resource，設定 `priv->simulated = true`。 |
+| `platform_get_resource` | platform resource API | 呼叫於 `driver/myled_ctrl.c:332` | `myled_probe` | 取得 MEM resource | `reg = <0x0 0x0d000000 0x0 0x1000>` | 若無 resource，設定 `priv->simulated = true`。 |
 | `devm_ioremap_resource` | managed MMIO API | 呼叫於 `driver/myled_ctrl.c:340` | `myled_probe` | map MMIO resource | `priv->base` | 失敗時清 `base` 並進入 simulated mode，而非 probe fail。 |
 | `platform_set_drvdata` / `dev_set_drvdata` | state binding API | 呼叫於 `driver/myled_ctrl.c:353-354` | `myled_probe` | 綁定 `priv` | `pdev`、`dev`、`priv` | sysfs show/store 與 PM callbacks 能透過 `dev_get_drvdata` / `platform_get_drvdata` 找回 state。 |
 | `myled_hw_init` | lifecycle helper | `driver/myled_ctrl.c:108` | `myled_probe` | VERSION check、sim fallback、brightness init、enable controller | `priv->simulated`、`sim_regs`、register macros | 成功後 device 進入可操作狀態；目前實作固定 return 0。 |
@@ -189,7 +189,7 @@ scripts/05_run_qemu.sh
 ```text
 scripts/05_run_qemu.sh
   -> qemu-system-aarch64 -machine virt -kernel Image -dtb dts/qemu-virt-myled.dtb -initrd rootfs/initramfs.cpio.gz
-  -> kernel uses DTB containing myled-controller@10010000
+  -> kernel uses DTB containing myled-controller@0d000000
   -> /init from initramfs
   -> insmod /myled_ctrl.ko
   -> module_platform_driver(myled_driver)
@@ -447,7 +447,7 @@ User echo brightness
 ```text
 /init
   -> sh /test_myled.sh
-  -> DEV=$(ls /sys/bus/platform/devices | grep "10010000" | sed -n '1p')
+  -> DEV=$(ls /sys/bus/platform/devices | grep "0d000000" | sed -n '1p')
   -> MYLED=/sys/bus/platform/devices/${DEV}/myled
   -> read info enable brightness color blink status
   -> echo 200 > brightness
@@ -816,7 +816,7 @@ sysfs show/store 可能由不同 process 同時呼叫；因此使用 spinlock �
 #### Build / Script Risk
 
 - `scripts/04_build_rootfs.sh:18` 的 `BUSYBOX` 是固定到使用者路徑 `~/桌面/Linux-kernel/qemu-platform-demo/busybox-1.36.1/busybox`。這是 script 可攜性風險；同檔案中原本有較通用的 busybox discovery 寫法但被註解。此點來自 script 直接觀察。
-- `rootfs/overlay/test_myled.sh` 以 `grep "10010000"` 尋找 device。若 `/sys/bus/platform/devices` 下有多個名稱包含 `10010000` 的 device，script 會取第一個。現有 DTS 只建立一個 `myled-controller@10010000`，但 script 本身不是嚴格 match exact device name。
+- `rootfs/overlay/test_myled.sh` 以 `grep "0d000000"` 尋找 device。若 `/sys/bus/platform/devices` 下有多個名稱包含 `0d000000` 的 device，script 會取第一個。現有 DTS 只建立一個 `myled-controller@0d000000`，但 script 本身不是嚴格 match exact device name。
 - `rootfs/overlay/init` 與部分 scripts 目前存在文字編碼亂碼；不影響此報告對 shell command 的結構分析，但可能影響 demo 顯示訊息可讀性。
 
 ---
@@ -846,7 +846,7 @@ sysfs show/store 可能由不同 process 同時呼叫；因此使用 spinlock �
 | Property | DTS 位置 | Driver 使用位置 | 影響 |
 |---|---|---|---|
 | `compatible = "myvendor,myled-v1"` | `dts/myled-fragment.dts:27` | `myled_of_match` | 觸發 OF/platform match。 |
-| `reg = <0x0 0x10010000 0x0 0x1000>` | `dts/myled-fragment.dts:28` | `platform_get_resource` / `devm_ioremap_resource` | 提供 MMIO base/size。 |
+| `reg = <0x0 0x0d000000 0x0 0x1000>` | `dts/myled-fragment.dts:28` | `platform_get_resource` / `devm_ioremap_resource` | 提供 MMIO base/size。 |
 | `num-leds = <4>` | `dts/myled-fragment.dts:29` | `of_property_read_u32` in `myled_probe` | 設定 `priv->num_leds`。 |
 | `label = "demo-rgb-led"` | `dts/myled-fragment.dts:30` | `of_property_read_string` in `myled_probe` | 只用於 log。 |
 | `default-brightness = <180>` | `dts/myled-fragment.dts:31` | `of_property_read_u32` in `myled_hw_init` | 初始化 brightness，並 clamp 到 255。 |
@@ -867,6 +867,6 @@ sysfs show/store 可能由不同 process 同時呼叫；因此使用 spinlock �
 
 ## 結論
 
-`qemu-platform-demo` 目前實作的是一個以 Device Tree match 觸發的 Linux platform driver demo。核心 execution semantics 是：QEMU 使用 patched DTB 產生 `myled-controller@10010000` platform device；rootfs `/init` 手動 `insmod` driver；platform bus 根據 compatible 呼叫 `myled_probe`；probe 建立 devm-managed private state、解析 DT、嘗試 MMIO mapping，若無法確認 hardware version 則切換到 simulated shadow register bank；接著建立 named sysfs group，讓 userspace 透過 `enable`、`brightness`、`color`、`blink`、`status`、`info` 間接操作或觀察 register state。
+`qemu-platform-demo` 目前實作的是一個以 Device Tree match 觸發的 Linux platform driver demo。核心 execution semantics 是：QEMU 使用 patched DTB 產生 `myled-controller@0d000000` platform device；rootfs `/init` 手動 `insmod` driver；platform bus 根據 compatible 呼叫 `myled_probe`；probe 建立 devm-managed private state、解析 DT、嘗試 MMIO mapping，若無法確認 hardware version 則切換到 simulated shadow register bank；接著建立 named sysfs group，讓 userspace 透過 `enable`、`brightness`、`color`、`blink`、`status`、`info` 間接操作或觀察 register state。
 
 此專案最重要的 callback chain 是 platform driver callback、sysfs attribute callback 與 system sleep PM callback。ownership 上沒有複雜 buffer transfer，主要依賴 devm 管理 `priv` 與 MMIO mapping，並由 explicit remove path 管理 sysfs group 與 logical hardware shutdown。可驗證風險集中在 read-modify-write helper 的 lock granularity、runtime PM callback 缺席但 runtime PM 被 enable、以及 rootfs build script 中 hard-coded BusyBox path。

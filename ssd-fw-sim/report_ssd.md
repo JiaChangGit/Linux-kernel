@@ -15,11 +15,11 @@
 在現代高速儲存介面中，**NVMe (Non-Volatile Memory express)** 採用了基於記憶體的佇列機制來減少延遲。
 
 *   **提交佇列 (Submission Queue, SQ)**: 主機 (Host) 將指令放入 SQ 中，等待控制器 (Controller) 提取。
-*   **完成佇列 (Completion Queue, CQ)**: 當指令執行完畢，控制器將結果放入 CQ，主機透過輪詢 (Polling) 或中斷 (Interrupt) 獲取結果。
-*   **門鈴暫存器 (Doorbell Register)**: 雖然本模擬器簡化了暫存器操作，但在真實硬體中，主機更新尾部指針 (Tail Pointer) 會觸發門鈴，告知控制器有新指令。
+*   **完成佇列 (Completion Queue, CQ)**: 當指令執行完畢，控制器將結果放入 CQ；本模擬器以 `nvme_reap_completions` 模擬主機端輪詢取回完成項，未實作中斷機制。
+*   **門鈴暫存器 (Doorbell Register)**: 真實硬體中主機更新尾部指針 (Tail Pointer) 會觸發門鈴；本模擬器未實作 doorbell register，而是以函式呼叫與 SQ/CQ ring buffer 模擬提交與提取流程。
 
 **深入探討：**
-模擬器中 `nvme.c` 實現了環形緩衝區 (Ring Buffer) 邏輯。`nvme_submit_write` 模擬了主機端的行為，而 `nvme_issue_pending` 則模擬了韌體提取指令到內部 **請求佇列 (Internal Request Queue)** 的過程。這模擬了硬體非同步處理的特性。
+模擬器中 `nvme.c` 實現了環形緩衝區 (Ring Buffer) 邏輯。`nvme_submit_write` 模擬了主機端提交指令，而 `nvme_issue_pending` 則模擬了韌體提取指令到內部 **請求佇列 (Internal Request Queue)** 的過程。這呈現了 NVMe SQ/CQ 與內部 request queue 的分層，但目前整體執行仍是單執行緒同步推進。
 
 ### 2.2 快閃記憶體轉換層 (Flash Translation Layer, FTL)
 
@@ -42,7 +42,7 @@ NAND 的基本單位是頁面 (Page) 和區塊 (Block)。
 *   **讀取與寫入以頁為單位**。
 *   **擦除以區塊為單位**。
 
-本模擬器嚴格遵守 NAND 的物理限制：
+本模擬器以簡化模型呈現 NAND 的主要物理限制：
 - **異地更新 (Out-of-place Update)**: 不允許原位覆蓋 (In-place overwrite)。
 - **頁面狀態遷移 (Page State Transition)**:
     - `FREE` (空閒) -> `VALID` (有效): 寫入數據。
@@ -59,7 +59,7 @@ NAND 的基本單位是頁面 (Page) 和區塊 (Block)。
 **深入探討：**
 GC 是導致 SSD 效能波動的主要原因。模擬器區分了：
 - **前台 GC (Foreground GC)**: 當分配頁面失敗時被迫執行的 GC，會嚴重阻塞主機 IO。
-- **後台 GC (Background GC)**: 在系統較為空閒或觸發閾值時執行的 GC，試圖在影響 IO 之前釋放空間。
+- **背景 GC (Background GC)**: 當 scheduler 或 write path 發現 free block 數量低於閾值時同步執行的預防性 GC。它會被統計為 background GC，但目前沒有獨立背景執行緒。
 
 ---
 
@@ -71,7 +71,7 @@ GC 是導致 SSD 效能波動的主要原因。模擬器區分了：
 
 1.  **NVMe 入隊**: `nvme_submit_write` 將指令包裝成 `nvme_submission_entry_t` 放入 SQ。
 2.  **指令提取**: `nvme_issue_pending` 從 SQ 提取指令，轉換為 `request_t` 放入韌體內部的 `request_queue`。
-3.  **調度執行**: `scheduler_dispatch` (在 `main.c` 迴圈中) 取出請求並調用 `ftl_handle_request`。
+3.  **調度執行**: `scheduler_run` 從內部 request queue 取出請求，記錄 queue/service latency，並調用 `ftl_handle_request`。
 4.  **FTL 處理**:
     - 對於每個 LPN (100, 101, 102, 103)：
         - 調用 `gc_needed` 檢查是否需要執行 GC。
@@ -110,7 +110,7 @@ WA 越高，代表 NAND 磨損越快，效能也越低。
 
 ## 5. 總結 (Conclusion)
 
-`ssd-fw-sim` 成功地模擬了一個高併發、非同步的 SSD 內部運作模型。通過對 **NVMe 佇列**、**FTL 位址映射** 以及 **GC 策略** 的細緻實現，它為理解 SSD 效能特徵（如延遲分佈、寫入放大）提供了一個強大的實驗平台。
+`ssd-fw-sim` 以單執行緒事件流程模擬 SSD 內部寫入路徑。通過對 **NVMe 佇列**、**FTL 位址映射** 以及 **GC 策略** 的實作，它為理解 SSD 效能特徵（如延遲分佈、寫入放大）提供了一個可觀測的實驗平台。
 
 未來的擴展方向可以包括：
 1.  **多通道/多晶片 (Multi-channel/Multi-die)** 的並行模擬。
