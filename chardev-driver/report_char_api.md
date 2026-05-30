@@ -1,12 +1,11 @@
 # Character Device Driver API 技術分析報告
 
-本報告只根據 `/chardev-driver` 目前實際存在的內容進行分析。分析優先順序為 source code、header file、build system、script、README/comment、實際呼叫流程。本次更新沿用原 report 的兩階段結構：先做 Codebase Trace，再整理 Architecture / API Technical Report；重點補上可驗證的 execution flow、callback chain、ownership / lifecycle、error path 與風險分析。
+本報告整理 `chardev-driver` 目前使用的 Linux kernel API、callback chain、資源生命週期與常見錯誤。閱讀順序建議是：先看整體圖，再看每個 API 的角色，最後看 BUG 分析與選擇依據。
 
-以下內容分成：
+本文使用兩種標示：
 
-- `# Direct Observation`：可直接從目前程式碼、Makefile 或 scripts 驗證。
-- `# Conservative Inference`：基於呼叫關係或 Linux driver model 的保守推論，會明確標示。
-- 若無法從現有內容確認，會直接寫「目前程式碼中未觀察到」或「無法從現有內容確認」。
+- `Direct Observation`：目前程式碼或腳本可以直接驗證。
+- `Conservative Inference`：根據 Linux driver model 與目前呼叫關係做出的保守推論。
 
 ---
 
@@ -14,934 +13,1023 @@
 
 ### 1. Project Structure
 
-#### # Direct Observation
+#### Direct Observation
 
 | 類別 | 檔案 | 角色 |
 |---|---|---|
-| source file | `driver/chardev.c` | kernel module 主體，實作 char device、VFS callbacks、ioctl、procfs、sysfs、module init/exit 與 cleanup unwind。 |
-| header file | `driver/chardev.h` | 定義 ioctl magic number、`IOCTL_RESET_BUF`、`IOCTL_GET_LEN`、`IOCTL_SET_RDONLY`、`CHARDEV_MAGIC_MAX`。kernel driver 與 userspace test 共用此 header。 |
-| build system | `driver/Makefile` | out-of-tree kernel module build，`obj-m += chardev.o`，target `install` 直接 `insmod chardev.ko`，`uninstall` 直接 `rmmod chardev`。 |
-| userspace source | `userspace/test_app.c` | 使用 `/dev/chardev0` 測試 `open`、`write`、`lseek`、`read`、`ioctl`、`close`。 |
-| userspace build | `userspace/Makefile` | 使用 `gcc -Wall -Wextra -I../driver` 編譯 `test_app.c`。 |
-| scripts | `scripts/load.sh` | 根據目前內容：計算 project root、driver dir、kernel build dir，執行 `make -C "$KDIR" M="$DRIVER_DIR" modules`，`sudo insmod "$DRIVER_DIR/chardev.ko" || true`，檢查 `/dev/chardev0`，嘗試 chmod，顯示 modinfo 與 dmesg。 |
-| scripts | `scripts/unload.sh` | 根據目前內容：`sudo rmmod chardev`，檢查 `/dev/chardev0` 與 `/proc/chardev_info` 是否移除，印 dmesg tail，進入 `driver` 執行 `make clean`。 |
-| docs | `docs/*.png` | demo/build 截圖；本報告未用圖片內容推導 driver 行為。 |
-| README/report | `README_char.md`、`report_char.md` | 說明性文件，僅作低優先級佐證。 |
+| Kernel source | `driver/chardev.c` | kernel module 主體，實作 char device、VFS callbacks、ioctl、procfs、sysfs、init/exit、error unwind。 |
+| Shared header | `driver/chardev.h` | 定義 ioctl magic number 與 command macro，driver 與 userspace 測試程式共用。 |
+| Kernel Makefile | `driver/Makefile` | 使用 kernel build system 建置 out-of-tree module。 |
+| Userspace source | `userspace/test_app.c` | 使用 `/dev/chardev0` 測試 `open()`、`write()`、`lseek()`、`read()`、`ioctl()`、`close()`。 |
+| Userspace Makefile | `userspace/Makefile` | 使用 `gcc -Wall -Wextra -I../driver` 編譯 `test_app.c`。 |
+| Load script | `scripts/load.sh` | 建置 driver、載入 `chardev.ko`、檢查 `/dev/chardev0`、顯示 module info 與 dmesg。 |
+| Unload script | `scripts/unload.sh` | 卸載 module、檢查 `/dev` 與 `/proc` 是否清除、執行 clean。 |
+| Documents | `README_char.md`、`report_char.md` | 操作教學與整體技術報告。 |
 
-#### Module / Component Relationship
+#### Component Relationship
 
-```text
-driver/chardev.h
-  -> ioctl macro shared by driver/chardev.c and userspace/test_app.c
+```mermaid
+flowchart TD
+  H["driver/chardev.h<br/>ioctl command definitions"]
+  D["driver/chardev.c<br/>kernel module"]
+  U["userspace/test_app.c<br/>test program"]
+  MK["driver/Makefile<br/>kernel module build"]
+  LS["scripts/load.sh<br/>build + insmod"]
+  US["scripts/unload.sh<br/>rmmod + clean"]
 
-driver/chardev.c
-  -> builds chardev.ko via driver/Makefile or scripts/load.sh
-  -> module_init(chardev_init)
-  -> creates:
-       /dev/chardev0               via cdev + class/device_create
-       /sys/class/chardev/chardev0 via class/device model + dev_groups
-       /proc/chardev_info          via proc_create
-
-userspace/test_app.c
-  -> open("/dev/chardev0", O_RDWR)
-  -> write/read/ioctl/close
-  -> shares ioctl command definitions from ../driver/chardev.h
-
-scripts/load.sh
-  -> make kernel module
-  -> insmod chardev.ko
-  -> verifies /dev/chardev0
-
-scripts/unload.sh
-  -> rmmod chardev
-  -> verifies /dev/chardev0 and /proc/chardev_info cleanup
-  -> make clean
+  H --> D
+  H --> U
+  MK --> D
+  LS --> MK
+  LS --> KO["chardev.ko"]
+  KO --> IF["external interfaces"]
+  IF --> DEV["/dev/chardev0"]
+  IF --> PROC["/proc/chardev_info"]
+  IF --> SYS["/sys/class/chardev/chardev0/*"]
+  U --> DEV
+  US --> KO
 ```
 
 ---
 
-### 2. Semantic Element Extraction
+### 2. Runtime Interface Map
 
-#### # Direct Observation
+#### Direct Observation
 
-以下只列目前實際存在的元素。
-
-| 類型 | 名稱 | 定義位置 | 說明 |
-|---|---|---|---|
-| registration macro | `module_init(chardev_init)` | `driver/chardev.c:326` | module load entry point。 |
-| registration macro | `module_exit(chardev_exit)` | `driver/chardev.c:327` | module unload entry point。 |
-| callback | `chardev_open` | `driver/chardev.c:62` | VFS `.open` callback，增加 `open_count`。 |
-| callback | `chardev_release` | `driver/chardev.c:69` | VFS `.release` callback，只印 log。 |
-| callback | `chardev_read` | `driver/chardev.c:74` | VFS `.read` callback，從 `drv.buf` 複製到 userspace。 |
-| callback | `chardev_write` | `driver/chardev.c:94` | VFS `.write` callback，從 userspace 複製到 `drv.buf`。 |
-| callback | `chardev_ioctl` | `driver/chardev.c:119` | VFS `.unlocked_ioctl` callback，處理 reset/get length/set read-only。 |
-| operation table / dispatch table | `chardev_fops` | `driver/chardev.c:158` | `struct file_operations`，把 VFS operations 綁到上述 callbacks。 |
-| callback | `proc_show` | `driver/chardev.c:171` | seq_file show callback，輸出 buffer/state/counters。 |
-| callback | `proc_open` | `driver/chardev.c:183` | procfs `.proc_open` callback，呼叫 `single_open(file, proc_show, NULL)`。 |
-| operation table / dispatch table | `chardev_proc_ops` | `driver/chardev.c:187` | `struct proc_ops`，綁定 procfs open/read/lseek/release。 |
-| callback | `buf_len_show` | `driver/chardev.c:200` | sysfs read-only `buf_len` show callback。 |
-| callback | `read_only_show` | `driver/chardev.c:207` | sysfs `read_only` show callback。 |
-| callback | `read_only_store` | `driver/chardev.c:212` | sysfs `read_only` store callback，透過 `kstrtoint` 更新 `drv.read_only`。 |
-| callback | `stats_show` | `driver/chardev.c:223` | sysfs read-only `stats` show callback。 |
-| sysfs attribute macro | `DEVICE_ATTR_RO(buf_len)` | `driver/chardev.c:204` | 建立 `buf_len` read-only attribute。 |
-| sysfs attribute macro | `DEVICE_ATTR_RW(read_only)` | `driver/chardev.c:220` | 建立 `read_only` read/write attribute。 |
-| sysfs attribute macro | `DEVICE_ATTR_RO(stats)` | `driver/chardev.c:229` | 建立 `stats` read-only attribute。 |
-| sysfs attribute group macro | `ATTRIBUTE_GROUPS(chardev)` | `driver/chardev.c:238` | 產生 `chardev_groups`，由 `drv.cls->dev_groups` 使用。 |
-| global state | anonymous `static struct drv` | `driver/chardev.c:34` | 儲存 buffer、state、counters、lock、device handles、proc entry。 |
-| synchronization primitive | `struct mutex lock` | `driver/chardev.c:44` | 保護 buffer copy/reset path。 |
-| synchronization primitive | `atomic_t open_count/read_count/write_count` | `driver/chardev.c:39-41` | 計數 open/read/write 次數。 |
-| memory management | `kzalloc(BUF_SIZE, GFP_KERNEL)` | `driver/chardev.c:248` | 初始化時配置 4096 bytes kernel buffer。 |
-| memory management | `kfree(drv.buf)` | `driver/chardev.c:310`、`322` | init error unwind 與 module exit 釋放 buffer。 |
-| registration mechanism | `alloc_chrdev_region` | `driver/chardev.c:258` | 動態取得 dev_t major/minor。 |
-| registration mechanism | `cdev_init` / `cdev_add` | `driver/chardev.c:266-268` | 將 `chardev_fops` 註冊到 char device。 |
-| registration mechanism | `class_create` | `driver/chardev.c:277` | 建立 `/sys/class/chardev` class。 |
-| registration mechanism | `device_create` | `driver/chardev.c:286` | 建立 `chardev0` device；udev 可能建立 `/dev/chardev0`。 |
-| registration mechanism | `proc_create` | `driver/chardev.c:293` | 建立 `/proc/chardev_info`。 |
-| communication mechanism | `copy_to_user` | `driver/chardev.c:82`、`137` | read 與 IOCTL_GET_LEN 從 kernel 複製資料到 userspace。 |
-| communication mechanism | `copy_from_user` | `driver/chardev.c:107`、`142` | write 與 IOCTL_SET_RDONLY 從 userspace 複製資料到 kernel。 |
-| external interface | `/dev/chardev0` | created via `device_create` | VFS char device interface。 |
-| external interface | `/proc/chardev_info` | created via `proc_create` | procfs status interface。 |
-| external interface | `/sys/class/chardev/chardev0/{buf_len,read_only,stats}` | class `dev_groups` + `device_create` | sysfs control/status interface。 |
-| ioctl macro | `IOCTL_RESET_BUF` | `driver/chardev.h:10` | `_IO(CHARDEV_MAGIC, 0)`，清空 buffer。 |
-| ioctl macro | `IOCTL_GET_LEN` | `driver/chardev.h:11` | `_IOR(CHARDEV_MAGIC, 1, int)`，取得資料長度。 |
-| ioctl macro | `IOCTL_SET_RDONLY` | `driver/chardev.h:12` | `_IOW(CHARDEV_MAGIC, 2, int)`，設定 read-only mode。 |
-| compiler / section annotation | `__init` | `driver/chardev.c:244` | 標示 init function。 |
-| compiler / section annotation | `__exit` | `driver/chardev.c:316` | 標示 exit function。 |
-| user pointer annotation | `char __user *`、`int __user *` | `driver/chardev.c:74`、`94`、`137`、`142` | 標示 userspace pointer。 |
-
-#### 目前程式碼中未觀察到
-
-- `.llseek` file operation；但 userspace test 使用 `lseek(fd, 0, SEEK_SET)`。
-- `.poll` / `.read_iter` / `.write_iter`。
-- wait queue、completion、spinlock、rwlock、RCU。
-- IRQ、tasklet、workqueue、timer。
-- mmap、DMA、async notification、fasync。
-- per-open private state，例如 `filp->private_data`。
-- 多 minor device；`alloc_chrdev_region(..., 1, ...)` 只註冊一個 device number。
+| 對外介面 | 觸發方式 | Kernel dispatch | Driver callback | 主要狀態 |
+|---|---|---|---|---|
+| `/dev/chardev0` | `open()` | VFS + `file_operations.open` | `chardev_open()` | `open_count` |
+| `/dev/chardev0` | `read()` / `cat` | VFS + `file_operations.read` | `chardev_read()` | `drv.buf`、`drv.buf_len`、`read_count` |
+| `/dev/chardev0` | `write()` / shell redirection | VFS + `file_operations.write` | `chardev_write()` | `drv.buf`、`drv.buf_len`、`read_only`、`write_count` |
+| `/dev/chardev0` | `ioctl()` | VFS + `file_operations.unlocked_ioctl` | `chardev_ioctl()` | `drv.buf_len`、`read_only` |
+| `/proc/chardev_info` | `cat` | procfs + `proc_ops` + `seq_file` | `proc_show()` | 狀態快照 |
+| `/sys/.../buf_len` | `cat` | sysfs attribute show | `buf_len_show()` | `drv.buf_len` |
+| `/sys/.../read_only` | `cat` / `echo` | sysfs attribute show/store | `read_only_show()` / `read_only_store()` | `drv.read_only` |
+| `/sys/.../stats` | `cat` | sysfs attribute show | `stats_show()` | atomic counters |
 
 ---
 
-### 3. API / Macro Inventory
+### 3. Callback Chain
 
-#### Initialization
+#### VFS / Character Device
 
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 關聯 struct/data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|---|
-| `module_init(chardev_init)` | macro | `driver/chardev.c:326` | module load | `insmod chardev.ko` 或 Makefile `install` | 設定 module 初始化入口 | `chardev_init` | module 載入時開始配置 buffer、註冊 char device/proc/sysfs。 |
-| `chardev_init` | init callback | `driver/chardev.c:244` | module load | `module_init` | 建立 driver 所需所有 resource | global `drv` | 成功後 driver 進入 operational state；失敗走 goto unwind。 |
-| `kzalloc` | memory API | call at `driver/chardev.c:248` | `chardev_init` | module init | 配置 4096 bytes buffer 並清零 | `drv.buf`、`BUF_SIZE` | 失敗直接回傳 `-ENOMEM`，其他 resource 不會建立。 |
-| `mutex_init` | sync init API | call at `driver/chardev.c:252` | `chardev_init` | module init | 初始化 `drv.lock` | `drv.lock` | read/write/reset path 可進入 mutex critical section。 |
-| `atomic_set` | atomic init API | call at `driver/chardev.c:253-255` | `chardev_init` | module init | 初始化 open/read/write counters | `drv.open_count`、`drv.read_count`、`drv.write_count` | proc/sysfs stats 有初始值。 |
+```mermaid
+sequenceDiagram
+  participant App as Userspace App
+  participant VFS as VFS
+  participant CDEV as cdev registry
+  participant Driver as chardev driver
 
-#### Registration
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 關聯 struct/data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|---|
-| `alloc_chrdev_region` | registration API | call at `driver/chardev.c:258` | `chardev_init` | module init | 動態配置 major/minor | `drv.devno` | 成功後可註冊 `cdev`；失敗釋放 buffer。 |
-| `cdev_init` | registration API | call at `driver/chardev.c:266` | `chardev_init` | module init | 初始化 `struct cdev` 並綁定 file operations | `drv.cdev`、`chardev_fops` | 決定 VFS indirect dispatch target。 |
-| `cdev_add` | registration API | call at `driver/chardev.c:268` | `chardev_init` | module init | 將 `cdev` 加入 kernel char device registry | `drv.devno` | 成功後 VFS 可依 dev_t 找到 fops。 |
-| `class_create` | registration API | call at `driver/chardev.c:277` | `chardev_init` | module init | 建立 device class | `drv.cls` | 後續 device_create 與 sysfs class/device path 依賴它。 |
-| `drv.cls->dev_groups = chardev_groups` | registration binding | `driver/chardev.c:283` | `chardev_init` | module init | 把 sysfs attribute groups 綁到 class device creation | `chardev_groups` | `device_create` 建立 device 時帶出 sysfs attributes。 |
-| `device_create` | registration API | call at `driver/chardev.c:286` | `chardev_init` | module init | 建立 `chardev0` device | `drv.dev`、`drv.devno` | 建立 `/sys/class/chardev/chardev0`；udev 可建立 `/dev/chardev0`。 |
-| `proc_create` | registration API | call at `driver/chardev.c:293` | `chardev_init` | module init | 建立 procfs entry | `drv.proc_entry`、`chardev_proc_ops` | 讓 `/proc/chardev_info` 可讀。 |
-
-#### Execution Path
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 關聯 struct/data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|---|
-| `chardev_fops` | operation table | `driver/chardev.c:158` | `cdev_init` | VFS indirect dispatch | 綁定 `.open/.release/.read/.write/.unlocked_ioctl` | `chardev_open/read/write/ioctl/release` | 所有 `/dev/chardev0` runtime I/O 都由此 table dispatch。 |
-| `chardev_open` | callback | `driver/chardev.c:62` | VFS `.open` | userspace `open("/dev/chardev0")` | 增加 `open_count` 並 log | `drv.open_count` | 不建立 per-open state；只改 global counter。 |
-| `chardev_read` | callback | `driver/chardev.c:74` | VFS `.read` | userspace `read()` / shell `cat` | 依 `*ppos` 從 `drv.buf` 複製資料到 userspace | `drv.buf`、`drv.buf_len`、`drv.lock`、`drv.read_count` | `*ppos >= drv.buf_len` 回 EOF；成功 read 會增加 offset 與 counter。 |
-| `chardev_write` | callback | `driver/chardev.c:94` | VFS `.write` | userspace `write()` / shell redirection | 檢查 read-only，限制 count，複製資料到 `drv.buf` | `drv.read_only`、`drv.buf`、`drv.buf_len`、`drv.lock`、`drv.write_count` | write 覆蓋 buffer，設定 `*ppos = drv.buf_len`。 |
-| `chardev_ioctl` | callback | `driver/chardev.c:119` | VFS `.unlocked_ioctl` | userspace `ioctl()` | 驗證 magic / nr 並 dispatch 三個 command | `drv.buf`、`drv.buf_len`、`drv.read_only` | reset/get length/set read-only 的控制入口。 |
-
-#### Lifecycle / Cleanup
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 關聯 struct/data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|---|
-| `module_exit(chardev_exit)` | macro | `driver/chardev.c:327` | module unload | `rmmod chardev` | 設定 module cleanup 入口 | `chardev_exit` | 卸載時依序釋放 proc/device/class/cdev/devno/buffer。 |
-| `chardev_exit` | exit callback | `driver/chardev.c:316` | module unload | `module_exit` | 正常 cleanup path | global `drv` | 釋放所有 init 成功後存在的 resource。 |
-| `proc_remove` | cleanup API | call at `driver/chardev.c:317` | `chardev_exit` | module unload | 移除 `/proc/chardev_info` | `drv.proc_entry` | procfs path 消失。 |
-| `device_destroy` | cleanup API | call at `driver/chardev.c:318`、`304` | exit / init unwind | module unload / init failure | 移除 device | `drv.cls`、`drv.devno` | `/sys/class/chardev/chardev0` 與 `/dev/chardev0` 對應 device 被移除。 |
-| `class_destroy` | cleanup API | call at `driver/chardev.c:319`、`306` | exit / init unwind | module unload / init failure | 移除 class | `drv.cls` | `/sys/class/chardev` class cleanup。 |
-| `cdev_del` | cleanup API | call at `driver/chardev.c:320`、`308` | exit / init unwind | module unload / init failure | 移除 cdev registration | `drv.cdev` | VFS 不再 dispatch 到本 driver fops。 |
-| `unregister_chrdev_region` | cleanup API | call at `driver/chardev.c:321`、`310` | exit / init unwind | module unload / init failure | 釋放 dev_t region | `drv.devno` | major/minor number 歸還 kernel。 |
-| `kfree` | cleanup API | call at `driver/chardev.c:322`、`312` | exit / init unwind | module unload / init failure | 釋放 kernel buffer | `drv.buf` | 避免 buffer leak。 |
-
-#### Memory Handling
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 關聯 struct/data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|---|
-| `BUF_SIZE` | macro | `driver/chardev.c:30` | `kzalloc`、write clamp、reset | init/write/ioctl | 固定 buffer 上限 4096 bytes | `drv.buf` | write count 大於 BUF_SIZE 時被截斷。 |
-| `copy_from_user` | userspace copy API | call at `driver/chardev.c:107`、`142` | write / ioctl set rdonly | VFS runtime | 從 userspace 複製資料到 kernel | `drv.buf`、`val` | 回傳未複製 bytes 或失敗；write 仍以部分成功更新 len。 |
-| `copy_to_user` | userspace copy API | call at `driver/chardev.c:82`、`137` | read / ioctl get len | VFS runtime | 從 kernel 複製資料到 userspace | `drv.buf`、`val` | read 依未複製 bytes 回傳實際 copied bytes；ioctl 失敗回 `-EFAULT`。 |
-| `memset` | memory API | call at `driver/chardev.c:129` | IOCTL_RESET_BUF | ioctl runtime | 清空 buffer | `drv.buf`、`BUF_SIZE` | reset 後 `drv.buf_len = 0`。 |
-
-#### Synchronization
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 關聯 struct/data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|---|
-| `struct mutex lock` | mutex | `driver/chardev.c:44` | read/write/reset | VFS runtime | 保護 buffer copy/reset 與 `buf_len` 更新 | `drv.buf`、`drv.buf_len` | read/write/reset 不會同時改動 buffer。 |
-| `atomic_t open_count` | atomic counter | `driver/chardev.c:39` | open/proc/sysfs stats | VFS/proc/sysfs | 記錄 open 次數 | `drv.open_count` | 無需 mutex 即可讀寫 counter。 |
-| `atomic_t read_count` | atomic counter | `driver/chardev.c:40` | read/proc/sysfs stats | VFS/proc/sysfs | 記錄 read 次數 | `drv.read_count` | read 成功或部分成功後增加。 |
-| `atomic_t write_count` | atomic counter | `driver/chardev.c:41` | write/proc/sysfs stats | VFS/proc/sysfs | 記錄 write 次數 | `drv.write_count` | write 成功或部分成功後增加。 |
-
-#### Event Dispatch
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 關聯 struct/data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|---|
-| `chardev_proc_ops` | operation table | `driver/chardev.c:187` | `proc_create` | procfs runtime | 綁定 procfs open/read/lseek/release | `proc_open`、`seq_read`、`seq_lseek`、`single_release` | `cat /proc/chardev_info` 經 procfs dispatch 到 `proc_show`。 |
-| `proc_open` | callback | `driver/chardev.c:183` | procfs `.proc_open` | `open("/proc/chardev_info")` | 呼叫 `single_open` 綁定 `proc_show` | `proc_show` | seq_file machinery 後續呼叫 `proc_show`。 |
-| `proc_show` | callback | `driver/chardev.c:171` | `single_open` | procfs read | 輸出 driver 狀態 | `drv.buf_len`、`drv.read_only`、atomic counters、`drv.buf` | procfs status snapshot。 |
-| `chardev_attrs[]` | sysfs attribute table | `driver/chardev.c:232` | `ATTRIBUTE_GROUPS` | sysfs runtime | 聚合 buf_len/read_only/stats | `dev_attr_*` | 決定 sysfs 暴露的 attribute。 |
-| `ATTRIBUTE_GROUPS(chardev)` | sysfs group macro | `driver/chardev.c:238` | `drv.cls->dev_groups` | device creation | 產生 class default device attribute groups | `chardev_attrs` | `device_create` 後 attributes 出現在 device sysfs path。 |
-
-#### Logging / Debug
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|
-| `pr_info` | logging API | 多處 | open/release/read/write/ioctl/init/exit | runtime/init/exit | 印 driver 狀態與 I/O 行為 | 不改變 control flow。 |
-| `pr_warn` | logging API | `driver/chardev.c:98` | `chardev_write` | write when read-only | 記錄 write 被 read-only mode 擋下 | 伴隨回傳 `-EACCES`。 |
-| `pr_err` | logging API | `driver/chardev.c:260`、`270` | init failure | init | 記錄 alloc/cdev_add failure | 伴隨 goto cleanup。 |
-| `seq_printf` | procfs output API | `driver/chardev.c:172-177` | `proc_show` | procfs read | 格式化輸出 procfs status | 不改變 state。 |
-| `sysfs_emit` | sysfs output API | `driver/chardev.c:202`、`210`、`225` | sysfs show callbacks | sysfs read | 格式化輸出 sysfs attribute | 不改變 state。 |
-
-#### Error Handling
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|
-| `-ENOMEM` | error code | `driver/chardev.c:248`、`294` | `chardev_init` | init | buffer 或 proc entry 建立失敗 | module load 失敗，依階段 cleanup。 |
-| `-ENOTTY` | error code | `driver/chardev.c:123-124`、`151` | `chardev_ioctl` | invalid ioctl | 拒絕 magic/nr/default command | ioctl call fail，不改 state。 |
-| `-EACCES` | error code | `driver/chardev.c:100` | `chardev_write` | read-only mode | 拒絕 write | 不進入 copy_from_user，不增加 write_count。 |
-| `-EFAULT` | error code | `driver/chardev.c:137`、`143` | `chardev_ioctl` | copy_to/from_user failure | userspace pointer copy 失敗 | GET_LEN / SET_RDONLY 不完整時回錯誤。 |
-| `-EINVAL` | error code | `driver/chardev.c:216` | `read_only_store` | sysfs parse failure | sysfs input 不是 int | 不更新 read_only。 |
-| goto labels | unwind path | `driver/chardev.c:301-312` | `chardev_init` | init error | 依已建立 resource 反向釋放 | 避免 init 中途失敗造成 leak。 |
-
----
-
-### 4. Call Graph
-
-#### Initialization Chain
-
-```text
-scripts/load.sh
-  -> make -C "$KDIR" M="$DRIVER_DIR" modules
-  -> sudo insmod "$DRIVER_DIR/chardev.ko" || true
-  -> kernel module loader
-  -> module_init(chardev_init)
-  -> chardev_init
-       -> drv.buf = kzalloc(BUF_SIZE, GFP_KERNEL)
-       -> mutex_init(&drv.lock)
-       -> atomic_set(open/read/write counters, 0)
-       -> alloc_chrdev_region(&drv.devno, 0, 1, DRIVER_NAME)
-       -> cdev_init(&drv.cdev, &chardev_fops)
-       -> drv.cdev.owner = THIS_MODULE
-       -> cdev_add(&drv.cdev, drv.devno, 1)
-       -> class_create(CLASS_NAME)
-       -> drv.cls->dev_groups = chardev_groups
-       -> device_create(drv.cls, NULL, drv.devno, NULL, "chardev0")
-       -> proc_create("chardev_info", 0444, NULL, &chardev_proc_ops)
-       -> operational
+  App->>VFS: open/read/write/ioctl("/dev/chardev0")
+  VFS->>CDEV: find dev_t major/minor
+  CDEV->>Driver: dispatch through chardev_fops
+  Driver-->>App: return ssize_t / int / errno
 ```
 
-#### Runtime Chain: `/dev/chardev0` read/write/ioctl
+`chardev_fops` 是核心的轉接表：
 
-```text
-userspace open("/dev/chardev0", O_RDWR)
-  -> VFS
-  -> cdev registered at drv.devno
-  -> chardev_fops.open
-  -> chardev_open
-       -> atomic_inc(&drv.open_count)
-
-userspace write(fd, user_buf, count)
-  -> VFS
-  -> chardev_fops.write
-  -> chardev_write
-       -> if drv.read_only: return -EACCES
-       -> if count > BUF_SIZE: count = BUF_SIZE
-       -> mutex_lock(&drv.lock)
-       -> copy_from_user(drv.buf, ubuf, count)
-       -> drv.buf_len = count - not_copied
-       -> *ppos = drv.buf_len
-       -> atomic_inc(&drv.write_count)
-       -> mutex_unlock(&drv.lock)
-       -> return count - not_copied
-
-userspace read(fd, user_buf, count)
-  -> VFS
-  -> chardev_fops.read
-  -> chardev_read
-       -> if *ppos >= drv.buf_len: return 0
-       -> mutex_lock(&drv.lock)
-       -> to_copy = min(drv.buf_len - *ppos, count)
-       -> copy_to_user(ubuf, drv.buf + *ppos, to_copy)
-       -> *ppos += copied
-       -> atomic_inc(&drv.read_count)
-       -> mutex_unlock(&drv.lock)
-       -> return copied
-
-userspace ioctl(fd, cmd, arg)
-  -> VFS
-  -> chardev_fops.unlocked_ioctl
-  -> chardev_ioctl
-       -> validate _IOC_TYPE(cmd) == CHARDEV_MAGIC
-       -> validate _IOC_NR(cmd) <= CHARDEV_MAGIC_MAX
-       -> switch(cmd)
+```c
+static const struct file_operations chardev_fops = {
+    .owner = THIS_MODULE,
+    .open = chardev_open,
+    .release = chardev_release,
+    .read = chardev_read,
+    .write = chardev_write,
+    .unlocked_ioctl = chardev_ioctl,
+};
 ```
 
-#### Runtime Chain: ioctl Commands
+重點：
 
-```text
-IOCTL_RESET_BUF
-  -> mutex_lock
-  -> memset(drv.buf, 0, BUF_SIZE)
-  -> drv.buf_len = 0
-  -> mutex_unlock
+- `.owner = THIS_MODULE` 可讓核心知道 callback 屬於本 module。
+- `.read`、`.write` 使用 `ssize_t` 回傳成功處理的 bytes，錯誤時回傳負 errno。
+- `.unlocked_ioctl` 是新版常用 ioctl callback，呼叫時不再由 VFS 幫 driver 上 Big Kernel Lock。
 
-IOCTL_GET_LEN
-  -> val = drv.buf_len
-  -> copy_to_user((int __user *)arg, &val, sizeof(val))
-
-IOCTL_SET_RDONLY
-  -> copy_from_user(&val, (int __user *)arg, sizeof(val))
-  -> drv.read_only = !!val
-```
-
-#### Runtime Chain: procfs
+#### procfs
 
 ```text
 cat /proc/chardev_info
   -> procfs open
   -> chardev_proc_ops.proc_open
-  -> proc_open
+  -> proc_open()
   -> single_open(file, proc_show, NULL)
-  -> seq_read
-  -> proc_show
-       -> seq_printf buf_len/read_only/counters/buf_content
-  -> single_release
+  -> seq_read()
+  -> proc_show()
+  -> single_release()
 ```
-
-#### Runtime Chain: sysfs
-
-```text
-cat /sys/class/chardev/chardev0/buf_len
-  -> sysfs dispatch
-  -> buf_len_show
-  -> sysfs_emit("%d\n", drv.buf_len)
-
-cat /sys/class/chardev/chardev0/read_only
-  -> read_only_show
-  -> sysfs_emit("%d\n", drv.read_only)
-
-echo 1 > /sys/class/chardev/chardev0/read_only
-  -> read_only_store
-  -> kstrtoint(buf, 10, &val)
-  -> drv.read_only = !!val
-
-cat /sys/class/chardev/chardev0/stats
-  -> stats_show
-  -> atomic_read(open/read/write counters)
-```
-
-#### Cleanup Chain
-
-```text
-scripts/unload.sh
-  -> sudo rmmod chardev
-  -> module_exit(chardev_exit)
-  -> chardev_exit
-       -> proc_remove(drv.proc_entry)
-       -> device_destroy(drv.cls, drv.devno)
-       -> class_destroy(drv.cls)
-       -> cdev_del(&drv.cdev)
-       -> unregister_chrdev_region(drv.devno, 1)
-       -> kfree(drv.buf)
-  -> scripts/unload.sh checks /dev/chardev0 and /proc/chardev_info
-  -> make clean
-```
-
-#### Callback Chain
-
-```text
-VFS callbacks:
-  chardev_fops.open           -> chardev_open
-  chardev_fops.release        -> chardev_release
-  chardev_fops.read           -> chardev_read
-  chardev_fops.write          -> chardev_write
-  chardev_fops.unlocked_ioctl -> chardev_ioctl
-
-procfs callbacks:
-  chardev_proc_ops.proc_open    -> proc_open -> single_open(... proc_show ...)
-  chardev_proc_ops.proc_read    -> seq_read
-  chardev_proc_ops.proc_lseek   -> seq_lseek
-  chardev_proc_ops.proc_release -> single_release
-
-sysfs callbacks:
-  dev_attr_buf_len.show       -> buf_len_show
-  dev_attr_read_only.show     -> read_only_show
-  dev_attr_read_only.store    -> read_only_store
-  dev_attr_stats.show         -> stats_show
-```
-
-#### Indirect Call Chain / Dispatch Table
-
-| Dispatch point | Table / function pointer | Target | Evidence |
-|---|---|---|---|
-| char device VFS dispatch | `struct file_operations chardev_fops` | `chardev_open/read/write/ioctl/release` | `driver/chardev.c:158-165` |
-| cdev binding | `cdev_init(&drv.cdev, &chardev_fops)` | `chardev_fops` | `driver/chardev.c:266` |
-| procfs dispatch | `struct proc_ops chardev_proc_ops` | `proc_open`、`seq_read`、`seq_lseek`、`single_release` | `driver/chardev.c:187-192` |
-| proc show binding | `single_open(file, proc_show, NULL)` | `proc_show` | `driver/chardev.c:184` |
-| sysfs dispatch | `DEVICE_ATTR_*` generated attributes | `buf_len_show`、`read_only_show/store`、`stats_show` | `driver/chardev.c:204`、`220`、`229` |
-| sysfs group binding | `drv.cls->dev_groups = chardev_groups` | `chardev_attrs[]` via `ATTRIBUTE_GROUPS` | `driver/chardev.c:232-238`、`283` |
-
----
-
-### 5. Struct / Resource Tracing
-
-#### `static struct { ... } drv`
-
-##### # Direct Observation
-
-`drv` 是 `driver/chardev.c:34-54` 的匿名 static global struct。欄位如下：
-
-| 欄位 | 初始化 / allocation | 使用位置 | ownership / lifetime |
-|---|---|---|---|
-| `char *buf` | `kzalloc(BUF_SIZE, GFP_KERNEL)` at `driver/chardev.c:248` | read/write/ioctl reset/proc_show | driver 擁有，module exit 或 init unwind 用 `kfree` 釋放。 |
-| `int buf_len` | static zero-init；write 更新；reset 設 0 | read、write、GET_LEN、buf_len_show、proc_show | global state，生命週期跟 module 一致。 |
-| `int read_only` | static zero-init；ioctl/sysfs store 更新 | write gate、proc/sysfs show | global mode flag，生命週期跟 module 一致。 |
-| `atomic_t open_count` | `atomic_set(..., 0)` | open、proc_show、stats_show | global counter，module lifetime。 |
-| `atomic_t read_count` | `atomic_set(..., 0)` | read、proc_show、stats_show | global counter，module lifetime。 |
-| `atomic_t write_count` | `atomic_set(..., 0)` | write、proc_show、stats_show | global counter，module lifetime。 |
-| `struct mutex lock` | `mutex_init` | read/write/RESET_BUF | global lock，module lifetime。 |
-| `dev_t devno` | `alloc_chrdev_region` | cdev_add/device_create/destroy/unregister | major/minor ownership 由 driver 註冊並在 exit/unwind 歸還。 |
-| `struct cdev cdev` | `cdev_init` / `cdev_add` | VFS dispatch | `cdev_del` 後解除 VFS binding。 |
-| `struct class *cls` | `class_create` | device_create/destroy/class_destroy | driver 擁有 class pointer，exit/unwind destroy。 |
-| `struct device *dev` | `device_create` | 目前只保存，未在 runtime callbacks 直接使用 | device object 由 `device_destroy` 移除。 |
-| `struct proc_dir_entry *proc_entry` | `proc_create` | `proc_remove` | proc entry 由 driver create/remove。 |
-
-#### Allocation / Init
-
-```text
-module load
-  -> static drv zero-initialized by kernel
-  -> drv.buf allocated by kzalloc
-  -> drv.lock initialized
-  -> atomic counters set 0
-  -> drv.devno allocated
-  -> drv.cdev initialized and added
-  -> drv.cls created
-  -> drv.cls->dev_groups bound
-  -> drv.dev created
-  -> drv.proc_entry created
-```
-
-#### Ownership
-
-- `drv.buf`：driver 手動擁有；`kzalloc` 後必須 `kfree`。
-- `drv.devno`：driver 透過 `alloc_chrdev_region` 取得；必須 `unregister_chrdev_region`。
-- `drv.cdev`：struct 內嵌在 `drv`，但 registry binding 需 `cdev_del` 解除。
-- `drv.cls`：`class_create` 回傳 pointer；必須 `class_destroy`。
-- `drv.dev`：`device_create` 建立 device；必須 `device_destroy`。
-- `drv.proc_entry`：`proc_create` 建立；必須 `proc_remove`。
-
-#### Lifetime / Release Timing
-
-正常 lifetime：
-
-```text
-chardev_init success
-  -> resource active until module unload
-  -> chardev_exit release in reverse-ish order:
-       proc_remove
-       device_destroy
-       class_destroy
-       cdev_del
-       unregister_chrdev_region
-       kfree
-```
-
-init failure unwind：
-
-```text
-proc_create failure
-  -> err_device: device_destroy
-  -> err_class: class_destroy
-  -> err_cdev: cdev_del
-  -> err_region: unregister_chrdev_region
-  -> err_buf: kfree
-
-device_create failure
-  -> err_class -> err_cdev -> err_region -> err_buf
-
-class_create failure
-  -> err_cdev -> err_region -> err_buf
-
-cdev_add failure
-  -> err_region -> err_buf
-
-alloc_chrdev_region failure
-  -> err_buf
-```
-
-#### State Transition
-
-```text
-Zero-initialized
-  -> Buffer allocated, buf_len=0, read_only=0, counters=0
-  -> Registered but not fully visible while init still running
-  -> Operational after proc_create success
-  -> Runtime write:
-       read_only=0 -> buf overwritten, buf_len set, write_count++
-       read_only=1 -> return -EACCES, no buffer update
-  -> Runtime read:
-       ppos < buf_len -> copy out, ppos advances, read_count++
-       ppos >= buf_len -> EOF
-  -> IOCTL_RESET_BUF:
-       buffer zeroed, buf_len=0
-  -> IOCTL_SET_RDONLY or sysfs read_only_store:
-       read_only toggled
-  -> Exit:
-       external entries removed, memory released
-```
-
-#### Data Passing Path
-
-```text
-userspace write buffer
-  -> write(fd, ubuf, count)
-  -> chardev_write
-  -> copy_from_user(drv.buf, ubuf, count)
-  -> drv.buf_len = count - not_copied
-  -> visible via:
-       read(fd, ...)
-       ioctl(IOCTL_GET_LEN)
-       cat /proc/chardev_info
-       cat /sys/class/chardev/chardev0/buf_len
-
-kernel buffer
-  -> chardev_read
-  -> copy_to_user(ubuf, drv.buf + *ppos, to_copy)
-  -> userspace rbuf
-
-read_only mode
-  -> ioctl(IOCTL_SET_RDONLY, &val) or sysfs read_only_store
-  -> drv.read_only = !!val
-  -> chardev_write gate checks drv.read_only
-```
-
-#### Callback Binding
-
-- `cdev_init(&drv.cdev, &chardev_fops)` binds VFS operation table before `cdev_add` exposes it.
-- `proc_create(PROC_ENTRY_NAME, 0444, NULL, &chardev_proc_ops)` binds procfs operation table.
-- `DEVICE_ATTR_*` macros create attributes; `chardev_attrs[]` collects them; `ATTRIBUTE_GROUPS(chardev)` generates `chardev_groups`; `drv.cls->dev_groups = chardev_groups` binds sysfs groups to devices created under the class.
-
----
-
-### 6. Execution Trace
-
-#### Initialization Flow
-
-```text
-[Build/Load]
-scripts/load.sh
-  -> derive ROOT_DIR, DRIVER_DIR, KDIR
-  -> verify driver dir and Makefile
-  -> make -C KDIR M=DRIVER_DIR modules
-  -> sudo insmod DRIVER_DIR/chardev.ko || true
-  -> ls -la /dev/chardev0
-  -> chmod 666 /dev/chardev0
-
-[Kernel init]
-module_init(chardev_init)
-  -> allocate kernel buffer
-  -> initialize mutex and atomic counters
-  -> allocate devno
-  -> bind file_operations through cdev
-  -> create class and attach dev_groups
-  -> create chardev0 device
-  -> create /proc/chardev_info
-```
-
-#### Runtime Flow
-
-```text
-[userspace/test_app.c]
-open /dev/chardev0
-  -> chardev_open
-write "Hello from userspace!"
-  -> chardev_write
-lseek fd to 0
-read
-  -> chardev_read
-ioctl GET_LEN
-  -> chardev_ioctl -> IOCTL_GET_LEN
-ioctl SET_RDONLY
-  -> chardev_ioctl -> IOCTL_SET_RDONLY
-write "blocked write"
-  -> chardev_write -> -EACCES if read_only was set
-ioctl SET_RDONLY off
-ioctl RESET_BUF
-  -> chardev_ioctl -> IOCTL_RESET_BUF
-lseek + read after reset
-close
-  -> chardev_release
-```
-
-#### Cleanup Flow
-
-```text
-scripts/unload.sh
-  -> sudo rmmod chardev
-  -> module_exit(chardev_exit)
-  -> remove proc entry
-  -> destroy device and class
-  -> delete cdev
-  -> unregister devno
-  -> free buffer
-  -> verify /dev/chardev0 and /proc/chardev_info
-  -> make clean
-```
-
-#### Event Flow
-
-```text
-VFS event:
-  open/read/write/ioctl/close on /dev/chardev0
-  -> file_operations dispatch
-  -> global drv state mutation or observation
-
-procfs event:
-  read /proc/chardev_info
-  -> proc_ops dispatch
-  -> single_open/seq_read
-  -> proc_show snapshot
-
-sysfs event:
-  read buf_len/read_only/stats
-  -> sysfs show callback
-  write read_only
-  -> sysfs store callback
-  -> update drv.read_only
-```
-
-#### Ownership Transfer
-
-目前程式碼中沒有複雜 buffer ownership transfer。`copy_from_user` / `copy_to_user` 是資料複製，不是 ownership 轉移。可驗證 ownership 是：
-
-- driver 擁有 `drv.buf`，userspace 永遠只提供來源/目的 user pointer。
-- kernel registry 擁有已註冊的 cdev/class/device/proc entry，但 driver 保存 handle 並負責 unregister/destroy/remove。
-- `test_app.c` 擁有 userspace fd；kernel driver 不保存 fd 或 per-open private data。
-
----
-
-## 第二階段：Architecture / API Technical Report
-
-### 1. Entry Point 行為
-
-#### # Direct Observation
-
-此 module 的 entry point 是 `module_init(chardev_init)`。目前 scripts 的載入路徑是 `scripts/load.sh:26` 先建置 module，再於 `scripts/load.sh:29` 使用 `sudo insmod "$DRIVER_DIR/chardev.ko" || true` 載入。`|| true` 代表 script 不會因 `insmod` 失敗而停止；這是 script 行為，不是 kernel module 行為。
-
-`chardev_init` 不是只註冊一個 `/dev` 介面，而是同時建立三個 external interfaces：
-
-1. char device：`cdev_init` / `cdev_add` + `device_create`，對外是 `/dev/chardev0`。
-2. procfs：`proc_create("chardev_info", 0444, NULL, &chardev_proc_ops)`，對外是 `/proc/chardev_info`。
-3. sysfs：`drv.cls->dev_groups = chardev_groups` 後 `device_create`，對外是 `/sys/class/chardev/chardev0/{buf_len,read_only,stats}`。
-
-初始化任何一段失敗時會走 goto label unwind，並依照已建立 resource 的階段做 cleanup。
-
----
-
-### 2. Callback Registration Chain
-
-#### VFS / Character Device
-
-```text
-chardev_init
-  -> cdev_init(&drv.cdev, &chardev_fops)
-  -> cdev_add(&drv.cdev, drv.devno, 1)
-  -> VFS operations on dev_t dispatch through chardev_fops
-```
-
-`chardev_fops` 是 char device 的主要 operation table：
-
-- `.open = chardev_open`
-- `.release = chardev_release`
-- `.read = chardev_read`
-- `.write = chardev_write`
-- `.unlocked_ioctl = chardev_ioctl`
-
-目前程式碼中未觀察到 `.llseek`；userspace test 使用 `lseek(fd, 0, SEEK_SET)`，因此 offset 行為依 VFS 預設處理。無法從 driver 內部確認 `.llseek` 是否符合所有預期，因為 driver 沒有自訂它。
-
-#### procfs
-
-```text
-chardev_init
-  -> proc_create(PROC_ENTRY_NAME, 0444, NULL, &chardev_proc_ops)
-  -> proc_open
-  -> single_open(file, proc_show, NULL)
-  -> seq_read
-  -> proc_show
-```
-
-procfs path 是 read-only mode (`0444`)。`proc_show` 會讀取 `drv.buf_len`、`drv.read_only`、atomic counters 與 `drv.buf` 內容。
 
 #### sysfs
 
 ```text
-DEVICE_ATTR_RO(buf_len)
-DEVICE_ATTR_RW(read_only)
-DEVICE_ATTR_RO(stats)
-  -> chardev_attrs[]
-  -> ATTRIBUTE_GROUPS(chardev)
-  -> chardev_groups
-  -> drv.cls->dev_groups = chardev_groups
-  -> device_create(...)
+cat /sys/class/chardev/chardev0/buf_len
+  -> sysfs
+  -> dev_attr_buf_len.show
+  -> buf_len_show()
+
+echo 1 > /sys/class/chardev/chardev0/read_only
+  -> sysfs
+  -> dev_attr_read_only.store
+  -> read_only_store()
 ```
 
-sysfs 的 `read_only` 與 ioctl 的 `IOCTL_SET_RDONLY` 都會改同一個 `drv.read_only`。這是可驗證的 shared state path。
+---
+
+### 4. Resource Lifecycle
+
+#### Direct Observation
+
+```mermaid
+flowchart TD
+  A["module load<br/>chardev_init()"]
+  B["kzalloc<br/>allocate drv.buf"]
+  C["alloc_chrdev_region<br/>get dev_t"]
+  D["cdev_init + cdev_add<br/>register VFS callbacks"]
+  E["class_create<br/>create class"]
+  F["dev_groups = chardev_groups<br/>bind sysfs attrs"]
+  G["device_create<br/>create chardev0 device"]
+  H["proc_create<br/>create /proc/chardev_info"]
+  I["operational"]
+  J["module unload<br/>chardev_exit()"]
+  K["proc_remove"]
+  L["device_destroy"]
+  M["class_destroy"]
+  N["cdev_del"]
+  O["unregister_chrdev_region"]
+  P["kfree"]
+
+  A --> B --> C --> D --> E --> F --> G --> H --> I
+  I --> J --> K --> L --> M --> N --> O --> P
+```
+
+#### Ownership Table
+
+| Resource | 建立 API | 保存位置 | 釋放 API | 為什麼要釋放 |
+|---|---|---|---|---|
+| Kernel buffer | `kzalloc()` | `drv.buf` | `kfree()` | 避免 kernel memory leak。 |
+| Device number | `alloc_chrdev_region()` | `drv.devno` | `unregister_chrdev_region()` | 歸還 major/minor range。 |
+| cdev registration | `cdev_add()` | `drv.cdev` | `cdev_del()` | 解除 VFS 到 driver callback 的連結。 |
+| Class | `class_create()` | `drv.cls` | `class_destroy()` | 移除 `/sys/class/chardev`。 |
+| Device | `device_create()` | `drv.dev` | `device_destroy()` | 移除 device object 與對應節點。 |
+| proc entry | `proc_create()` | `drv.proc_entry` | `proc_remove()` | 移除 `/proc/chardev_info`。 |
 
 ---
 
-### 3. Runtime Dispatch Flow
+### 5. Data Flow
 
-#### `/dev/chardev0` write
+#### write path
 
-`chardev_write` 先檢查 `drv.read_only`。若為 true，直接回傳 `-EACCES`，不進入 mutex、不 copy、不增加 `write_count`。若可寫，`count` 超過 `BUF_SIZE` 時會被裁到 4096，接著在 mutex 內執行 `copy_from_user`，用新的內容覆蓋 `drv.buf`，並將 `drv.buf_len` 設為成功複製 bytes。
+```mermaid
+flowchart LR
+  A["userspace buffer<br/>const char __user *ubuf"]
+  B["write(fd, ubuf, count)"]
+  C["VFS"]
+  D["chardev_write()"]
+  E{"read_only?"}
+  F["return -EACCES"]
+  G["mutex_lock()"]
+  H["copy_from_user(drv.buf, ubuf, count)"]
+  I["drv.buf_len = copied bytes"]
+  J["atomic_inc(write_count)"]
+  K["mutex_unlock()"]
 
-這裡不是 append model；每次 write 都從 `drv.buf` 開頭覆蓋，並把 `*ppos` 設到新的 `drv.buf_len`。
+  A --> B --> C --> D --> E
+  E -- "yes" --> F
+  E -- "no" --> G --> H --> I --> J --> K
+```
 
-#### `/dev/chardev0` read
+#### read path
 
-`chardev_read` 先在 mutex 外檢查 `*ppos >= drv.buf_len`，符合時回傳 0 表示 EOF。否則進入 mutex，計算 `to_copy = min(drv.buf_len - *ppos, count)`，再 `copy_to_user`。完成後以成功複製 bytes 推進 `*ppos`，並增加 `read_count`。
+```mermaid
+flowchart LR
+  A["read(fd, user_buf, count)"]
+  B["chardev_read()"]
+  C{"*ppos >= drv.buf_len?"}
+  D["return 0<br/>EOF"]
+  E["mutex_lock()"]
+  F["to_copy = min(remaining, count)"]
+  G["copy_to_user(user_buf, drv.buf + *ppos, to_copy)"]
+  H["*ppos += copied"]
+  I["atomic_inc(read_count)"]
+  J["mutex_unlock()"]
 
-#### ioctl
+  A --> B --> C
+  C -- "yes" --> D
+  C -- "no" --> E --> F --> G --> H --> I --> J
+```
 
-`chardev_ioctl` 先檢查 `_IOC_TYPE(cmd) == CHARDEV_MAGIC`，再檢查 `_IOC_NR(cmd) <= CHARDEV_MAGIC_MAX`。符合後用 switch 分派：
+#### ioctl path
 
-- `IOCTL_RESET_BUF`：在 mutex 內 `memset` buffer 並將 `buf_len` 設為 0。
-- `IOCTL_GET_LEN`：把 `drv.buf_len` 複製到 userspace int pointer。
-- `IOCTL_SET_RDONLY`：從 userspace int pointer 複製值，設定 `drv.read_only = !!val`。
+```mermaid
+flowchart TD
+  A["ioctl(fd, cmd, arg)"]
+  B["chardev_ioctl()"]
+  C{"_IOC_TYPE(cmd) == CHARDEV_MAGIC?"}
+  D["return -ENOTTY"]
+  E{"_IOC_NR(cmd) <= CHARDEV_MAGIC_MAX?"}
+  F{"cmd"}
+  G["IOCTL_RESET_BUF<br/>memset + buf_len=0"]
+  H["IOCTL_GET_LEN<br/>copy_to_user(&len)"]
+  I["IOCTL_SET_RDONLY<br/>copy_from_user(&val)<br/>read_only=!!val"]
 
-#### procfs / sysfs
-
-procfs 與 sysfs 都是觀察 global `drv` state；sysfs 的 `read_only_store` 另有 control role。procfs 使用 `seq_printf` 輸出多欄位；sysfs 使用 `sysfs_emit` 分別輸出單一 attribute 或 counters。
+  A --> B --> C
+  C -- "no" --> D
+  C -- "yes" --> E
+  E -- "no" --> D
+  E -- "yes" --> F
+  F --> G
+  F --> H
+  F --> I
+```
 
 ---
 
-### 4. Indirect Call Path
+## 第二階段：API Technical Report
 
-#### # Direct Observation
+### 1. Module Entry API
 
-本專案的 indirect dispatch 主要有三層：
+#### `module_init()` / `module_exit()`
 
-1. VFS 透過 `struct file_operations chardev_fops` dispatch 到 char device callbacks。
-2. procfs 透過 `struct proc_ops chardev_proc_ops` dispatch 到 `proc_open`，再經 `single_open` 綁定 `proc_show`。
-3. sysfs 透過 `DEVICE_ATTR_*` 產生的 device attributes dispatch 到 show/store callbacks。
+| API | 類型 | 功能 | 本專案使用方式 |
+|---|---|---|---|
+| `module_init(fn)` | Macro | 指定 module 載入入口 | `module_init(chardev_init)` |
+| `module_exit(fn)` | Macro | 指定 module 卸載入口 | `module_exit(chardev_exit)` |
 
-目前程式碼中未觀察到手寫 event loop、IRQ dispatch、workqueue callback 或 timer callback。
+教學重點：
+
+- `insmod` 成功載入 `.ko` 時，核心呼叫 `chardev_init()`。
+- `rmmod` 卸載 module 時，核心呼叫 `chardev_exit()`。
+- init 成功後建立的資源，exit 必須對應釋放。
+
+相近概念比較：
+
+| 機制 | 英文 | 差異 |
+|---|---|---|
+| `module_init()` | Module Entry | 給可載入模組使用，透過 `insmod` 觸發。 |
+| `module_exit()` | Module Exit | 給可卸載模組使用，透過 `rmmod` 觸發。 |
+| `subsys_initcall()` 等 initcall | Built-in Initcall | 常用於編進 kernel image 的子系統初始化，不是本專案情境。 |
+
+選擇依據：
+
+- 本專案是 out-of-tree kernel module，因此使用 `module_init()` / `module_exit()` 最直接。
 
 ---
 
-### 5. Resource Lifecycle
+### 2. Memory Allocation API
 
-#### Manual Resource Model
+#### `kzalloc()` vs `kmalloc()` vs `vmalloc()` vs `devm_kzalloc()`
 
-此 driver 沒有使用 `devm_*`；所有核心 resource 都由 module init/exit 手動管理。這也是 init failure path 需要 goto unwind 的原因。
+| API | 英文 | 特性 | 適合情境 | 本專案選擇 |
+|---|---|---|---|---|
+| `kzalloc(size, GFP_KERNEL)` | Zeroed Kernel Allocation | 配置連續實體頁對應的 kernel memory，內容清零 | 小型結構或 buffer，需初始為 0 | 使用 |
+| `kmalloc(size, GFP_KERNEL)` | Kernel Allocation | 配置後不保證清零 | 需要自行初始化，追求少一點清零成本 | 未使用 |
+| `vmalloc(size)` | Virtual Allocation | 虛擬位址連續，實體頁不一定連續 | 大型 buffer | 未使用 |
+| `devm_kzalloc(dev, size, GFP_KERNEL)` | Device-managed Allocation | device 生命週期自動釋放 | platform driver / device driver probe | 未使用 |
+
+本專案選 `kzalloc()` 的原因：
+
+- `BUF_SIZE` 是 4096 bytes，屬於小型 buffer。
+- 初始化後 buffer 應該是乾淨狀態。
+- 本專案沒有 platform device 的 `struct device *` probe 生命週期，不適合示範 `devm_kzalloc()`。
+
+關鍵字：
+
+- `GFP_KERNEL`：一般 process context 可用的配置旗標，配置時可以睡眠。
+- Kernel Buffer：核心空間中的資料緩衝區，不能直接交給 user space 指標使用。
+
+---
+
+### 3. Character Device Registration API
+
+#### `alloc_chrdev_region()`
+
+用途：
+
+```c
+ret = alloc_chrdev_region(&drv.devno, 0, 1, DRIVER_NAME);
+```
+
+意義：
+
+- 動態分配一組 `dev_t`。
+- `dev_t` 內含 major number 與 minor number。
+- `0, 1` 表示從 minor 0 開始，分配 1 個裝置。
+
+比較：
+
+| API | 英文 | 特性 | 適合情境 |
+|---|---|---|---|
+| `alloc_chrdev_region()` | Allocate Character Device Region | 由 kernel 動態分配 major | 教學、一般 driver，避免手動衝突 |
+| `register_chrdev_region()` | Register Fixed Device Region | 使用指定 major/minor | 已有固定 major 的 driver |
+| `register_chrdev()` | Legacy Character Device Register | 較舊式介面，抽象較少彈性 | 舊程式或簡單範例 |
+
+選擇依據：
+
+- 本專案不需要固定 major number。
+- 動態配置可降低與既有 driver 衝突的機率。
+
+#### `cdev_init()` / `cdev_add()`
+
+```c
+cdev_init(&drv.cdev, &chardev_fops);
+drv.cdev.owner = THIS_MODULE;
+ret = cdev_add(&drv.cdev, drv.devno, 1);
+```
+
+角色：
+
+- `cdev_init()`：把 `struct cdev` 和 `struct file_operations` 綁在一起。
+- `cdev_add()`：把這個字元裝置加入 kernel registry。
+
+比較：
+
+| 寫法 | 英文 | 優點 | 限制 |
+|---|---|---|---|
+| `cdev_init()` + `cdev_add()` | Explicit cdev Registration | 清楚控制 dev_t、cdev、class、device | 程式碼較長 |
+| `misc_register()` | Misc Device | 快速建立 misc device，自動使用 misc major | 不適合教學 major/minor 與完整 cdev 流程 |
+
+選擇依據：
+
+- 本專案目標是理解 character device 的完整流程，所以使用 `cdev`。
+
+---
+
+### 4. Device Model API
+
+#### `class_create()` / `device_create()`
+
+```c
+drv.cls = class_create(...);
+drv.cls->dev_groups = chardev_groups;
+drv.dev = device_create(drv.cls, NULL, drv.devno, NULL, "chardev0");
+```
+
+作用：
+
+- `class_create()` 建立 `/sys/class/chardev`。
+- `dev_groups` 讓同一 class 底下的 device 自動帶有 sysfs attributes。
+- `device_create()` 建立 `/sys/class/chardev/chardev0`。
+- udev 收到 kernel uevent 後，通常會建立 `/dev/chardev0`。
+
+與手動 `mknod` 比較：
+
+| 方法 | 英文 | 優點 | 缺點 |
+|---|---|---|---|
+| `device_create()` + udev | Device Model / udev | 自動化，符合現代 Linux device model | 需要 udev 正常運作 |
+| `mknod /dev/chardev0 c major minor` | Manual Device Node | 不依賴 udev | 容易忘記 major/minor，部署較不方便 |
+
+選擇依據：
+
+- 本專案希望載入 module 後可直接看到 `/dev/chardev0`，所以使用 device model。
+
+#### `class_create()` 版本差異
+
+開發 driver 常遇到 kernel API 版本差異。`class_create()` 就是一個例子：
+
+```c
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+  drv.cls = class_create(CLASS_NAME);
+#else
+  drv.cls = class_create(THIS_MODULE, CLASS_NAME);
+#endif
+```
+
+分析：
+
+- 舊 kernel 需要傳入 module owner。
+- 新 kernel 移除這個參數。
+- 用版本判斷可以讓同一份程式碼較容易跨 kernel 編譯。
+
+---
+
+### 5. VFS File Operation API
+
+#### `open()` / `release()`
+
+`chardev_open()` 目前只增加 `open_count`：
 
 ```text
-kzalloc
-  -> kfree
-alloc_chrdev_region
-  -> unregister_chrdev_region
-cdev_add
-  -> cdev_del
-class_create
-  -> class_destroy
-device_create
-  -> device_destroy
-proc_create
-  -> proc_remove
+open("/dev/chardev0")
+  -> VFS
+  -> chardev_open()
+  -> atomic_inc(open_count)
 ```
 
-#### External Interface Lifecycle
+`release()` 目前只印 log，沒有 per-open state 要清理。
 
-| Interface | 建立位置 | 移除位置 | 備註 |
+關鍵字：
+
+- File Descriptor：使用者空間拿到的整數 fd。
+- `struct file`：kernel 內部代表一次 open 的檔案物件。
+- `filp->private_data`：常用來保存每次 open 的私有狀態，本專案沒有使用。
+
+#### `read()` / `write()`
+
+| callback | 資料方向 | User pointer | Kernel API |
 |---|---|---|---|
-| `/dev/chardev0` | `device_create` + userspace udev behavior | `device_destroy` | script 以 `ls /dev/chardev0` 驗證。 |
-| `/sys/class/chardev/chardev0/*` | `drv.cls->dev_groups` + `device_create` | `device_destroy` / `class_destroy` | attribute group 由 class dev_groups 帶出。 |
-| `/proc/chardev_info` | `proc_create` | `proc_remove` | proc entry pointer 存於 `drv.proc_entry`。 |
+| `chardev_write()` | User -> Kernel | `const char __user *ubuf` | `copy_from_user()` |
+| `chardev_read()` | Kernel -> User | `char __user *ubuf` | `copy_to_user()` |
 
-#### State Lifecycle
+`__user` 是給 sparse 等靜態檢查工具看的註記，提醒這個指標來自 user space。
 
-`drv.buf_len`、`drv.read_only` 與 counters 都是 module-global state。`open()` 不建立 instance state，`release()` 也不清理 per-open state。因此多個 file descriptor 共享同一份 buffer、read_only flag 與 counters。
+#### `copy_to_user()` vs `copy_from_user()` vs `memcpy()`
+
+| API | 英文 | 來源 | 目的 | 能否直接用於 user pointer |
+|---|---|---|---|---|
+| `copy_from_user()` | Copy From User | User Space | Kernel Space | 可以 |
+| `copy_to_user()` | Copy To User | Kernel Space | User Space | 可以 |
+| `memcpy()` | Memory Copy | 一般記憶體 | 一般記憶體 | 不可直接拿來複製 user pointer |
+
+選擇依據：
+
+- user pointer 可能無效，也可能觸發 page fault。
+- `copy_*_user()` 會處理 user/kernel 邊界檢查與錯誤回報。
+- 在 kernel 中直接 `memcpy()` user pointer 可能造成錯誤甚至系統不穩。
 
 ---
 
-### 6. Error Propagation Path
+### 6. ioctl API
 
-#### Initialization Error Path
+#### Command macro
 
-| 失敗點 | 回傳值 | cleanup |
+`driver/chardev.h` 定義：
+
+```c
+#define CHARDEV_MAGIC 'k'
+#define IOCTL_RESET_BUF _IO(CHARDEV_MAGIC, 0)
+#define IOCTL_GET_LEN _IOR(CHARDEV_MAGIC, 1, int)
+#define IOCTL_SET_RDONLY _IOW(CHARDEV_MAGIC, 2, int)
+```
+
+| Macro | 英文 | 資料方向 | 本專案用途 |
+|---|---|---|---|
+| `_IO` | I/O command without data | 無 | 清空 buffer。 |
+| `_IOR` | I/O read | Kernel -> User | 取得 `buf_len`。 |
+| `_IOW` | I/O write | User -> Kernel | 設定 `read_only`。 |
+| `_IOWR` | I/O read/write | 雙向 | 本專案未使用。 |
+
+#### Command validation
+
+```c
+if (_IOC_TYPE(cmd) != CHARDEV_MAGIC) return -ENOTTY;
+if (_IOC_NR(cmd) > CHARDEV_MAGIC_MAX) return -ENOTTY;
+```
+
+用途：
+
+- `_IOC_TYPE(cmd)` 檢查 magic number。
+- `_IOC_NR(cmd)` 檢查 command number。
+- `-ENOTTY` 表示此 ioctl 不適用於這個裝置。
+
+#### ioctl 與 read/write/sysfs 的比較
+
+| 介面 | 適合資料 | 使用方式 | 本專案例子 |
+|---|---|---|---|
+| `read()` / `write()` | 連續資料流 | 檔案 I/O | 傳入或讀出 buffer 內容 |
+| `ioctl()` | 控制命令 | C 程式呼叫，需 header | reset、get length、set read-only |
+| sysfs | 裝置屬性 | `cat` / `echo` | `read_only`、`buf_len`、`stats` |
+| procfs | 診斷資訊 | `cat` | `/proc/chardev_info` 狀態輸出 |
+
+選擇依據：
+
+- 如果是資料內容，使用 `read()` / `write()`。
+- 如果是明確控制命令，使用 `ioctl()`。
+- 如果是單一裝置屬性，使用 sysfs。
+- 如果是整份診斷報告，使用 procfs。
+
+---
+
+### 7. procfs API
+
+#### `proc_create()` / `single_open()` / `seq_file`
+
+建立：
+
+```c
+drv.proc_entry = proc_create(PROC_ENTRY_NAME, 0444, NULL, &chardev_proc_ops);
+```
+
+讀取流程：
+
+```text
+cat /proc/chardev_info
+  -> proc_open()
+  -> single_open(file, proc_show, NULL)
+  -> seq_read()
+  -> proc_show()
+```
+
+`seq_file` 的用途：
+
+- 管理輸出 buffer。
+- 避免自己處理多次 read 時的分段輸出細節。
+- `seq_printf()` 比手動維護 offset 容易讀。
+
+相近 API 比較：
+
+| API | 英文 | 適合情境 |
 |---|---|---|
-| `kzalloc` 失敗 | `-ENOMEM` | 直接 return，尚無 resource。 |
-| `alloc_chrdev_region` 失敗 | ret | `kfree(drv.buf)`。 |
-| `cdev_add` 失敗 | ret | `unregister_chrdev_region` + `kfree`。 |
-| `class_create` 失敗 | `PTR_ERR(drv.cls)` | `cdev_del` + `unregister_chrdev_region` + `kfree`。 |
-| `device_create` 失敗 | `PTR_ERR(drv.dev)` | `class_destroy` + `cdev_del` + `unregister_chrdev_region` + `kfree`。 |
-| `proc_create` 失敗 | `-ENOMEM` | `device_destroy` + `class_destroy` + `cdev_del` + `unregister_chrdev_region` + `kfree`。 |
+| `single_open()` | Single seq_file Open | 輸出一次性狀態，本專案使用。 |
+| `seq_open()` | Sequence Open | 輸出列表或需要 iterator 的內容。 |
+| `simple_read_from_buffer()` | Simple Buffer Read | 已經有一段固定字串 buffer，可簡單輸出。 |
 
-#### Runtime Error Path
+選擇依據：
 
-| path | 錯誤條件 | 回傳 |
+- `/proc/chardev_info` 是動態產生的一次性狀態報告，因此 `single_open()` 很適合。
+
+---
+
+### 8. sysfs API
+
+#### `DEVICE_ATTR_RO()` / `DEVICE_ATTR_RW()`
+
+```c
+static DEVICE_ATTR_RO(buf_len);
+static DEVICE_ATTR_RW(read_only);
+static DEVICE_ATTR_RO(stats);
+```
+
+巨集會依命名規則尋找 callback：
+
+| Macro | 需要的 callback | 權限 |
 |---|---|---|
-| `chardev_write` | `drv.read_only != 0` | `-EACCES` |
-| `chardev_ioctl` | wrong `_IOC_TYPE` | `-ENOTTY` |
-| `chardev_ioctl` | `_IOC_NR(cmd) > CHARDEV_MAGIC_MAX` | `-ENOTTY` |
-| `IOCTL_GET_LEN` | `copy_to_user` failure | `-EFAULT` |
-| `IOCTL_SET_RDONLY` | `copy_from_user` failure | `-EFAULT` |
-| sysfs `read_only_store` | `kstrtoint` failure | `-EINVAL` |
-| `chardev_read` | `*ppos >= drv.buf_len` | `0` EOF |
+| `DEVICE_ATTR_RO(name)` | `name_show()` | Read-only |
+| `DEVICE_ATTR_RW(name)` | `name_show()`、`name_store()` | Read / Write |
+| `DEVICE_ATTR_WO(name)` | `name_store()` | Write-only |
 
-#### Script Error Behavior
+本專案屬性：
 
-`scripts/load.sh` 對 `insmod` 使用 `|| true`，因此即使 module load 失敗，script 仍會繼續檢查 device、chmod、modinfo 與 dmesg。這可能讓 script exit status 不能完全代表 module load 成功。這是 script 直接觀察，不是 driver 行為。
+| Attribute | show/store | 說明 |
+|---|---|---|
+| `buf_len` | `buf_len_show()` | 回傳目前 buffer 長度。 |
+| `read_only` | `read_only_show()` / `read_only_store()` | 讀取或設定唯讀模式。 |
+| `stats` | `stats_show()` | 回傳 open/read/write 計數。 |
 
----
+#### `sysfs_emit()` vs `sprintf()`
 
-### 7. Synchronization Role
-
-#### # Direct Observation
-
-有 mutex 保護的 path：
-
-- `chardev_read` 中的 copy_to_user 與 `*ppos` / `read_count` 更新。
-- `chardev_write` 中的 copy_from_user、`buf_len`、`*ppos`、`write_count` 更新。
-- `IOCTL_RESET_BUF` 中的 `memset` 與 `buf_len = 0`。
-
-未受 mutex 保護但會讀/寫 shared state 的 path：
-
-- `chardev_read` 在 mutex 外讀 `drv.buf_len` 做 EOF check。
-- `chardev_write` 在 mutex 外讀 `drv.read_only`。
-- `IOCTL_GET_LEN` 直接讀 `drv.buf_len`，沒有 mutex。
-- `IOCTL_SET_RDONLY` 直接寫 `drv.read_only`，沒有 mutex。
-- `read_only_show` / `read_only_store` 直接讀寫 `drv.read_only`，沒有 mutex。
-- `buf_len_show` 直接讀 `drv.buf_len`，沒有 mutex。
-- `proc_show` 直接讀 `drv.buf_len`、`drv.read_only`、`drv.buf`，沒有 mutex。
-
-#### # Conservative Inference
-
-因為所有 file descriptors 共享同一個 global `drv`，多個 process 同時 read/write/ioctl/sysfs 操作時會碰到同一份 state。mutex 已涵蓋主要 buffer copy/reset path，但 `read_only` 與部分 `buf_len` observation 沒有同步保護；在 32-bit int 讀寫通常是自然大小操作，但是否符合完整一致性需求無法只靠目前程式碼確認。可直接指出的是：proc/sysfs snapshot 可能讀到與 write/reset 交錯的狀態。
-
----
-
-### 8. 比較分析
-
-#### `copy_to_user` vs `copy_from_user`
-
-- `copy_from_user` 出現在 write 與 `IOCTL_SET_RDONLY`，資料方向是 userspace 到 kernel。
-- `copy_to_user` 出現在 read 與 `IOCTL_GET_LEN`，資料方向是 kernel 到 userspace。
-- 使用原因可由 code 直接驗證：`write` 要接收 userspace buffer 存入 `drv.buf`；`read` 要把 `drv.buf` 回傳；`IOCTL_SET_RDONLY` 要接收 int；`IOCTL_GET_LEN` 要回傳 int。
-
-#### `read_only` 控制：ioctl vs sysfs
-
-| path | API | parsing/copy | state effect |
+| API | 英文 | 適合情境 | 原因 |
 |---|---|---|---|
-| ioctl | `IOCTL_SET_RDONLY` | `copy_from_user(&val, (int __user *)arg, sizeof(val))` | `drv.read_only = !!val` |
-| sysfs | `read_only_store` | `kstrtoint(buf, 10, &val)` | `drv.read_only = !!val` |
+| `sysfs_emit()` | sysfs formatted output | sysfs show callback | 專為 sysfs buffer 設計，較安全。 |
+| `sprintf()` | formatted string output | 一般字串格式化 | 不知道 sysfs buffer 限制，不建議用於 sysfs show。 |
+| `scnprintf()` | size-limited formatted output | 需要自行管理 buffer 長度 | 可控但較麻煩。 |
 
-兩者差異在外部介面與資料來源：ioctl 需要已開啟的 fd 與 userspace pointer；sysfs 透過文字輸入。使用原因只能依 code 說明：兩者都提供控制同一個 read-only flag 的入口，沒有看到額外權限或鎖定差異。
+選擇依據：
 
-#### callback 機制差異
+- sysfs show callback 應優先使用 `sysfs_emit()`。
 
-| callback 類型 | 註冊方式 | 觸發來源 | data model |
+#### `kstrtoint()` vs `sscanf()`
+
+`read_only_store()` 使用：
+
+```c
+if (kstrtoint(buf, 10, &val)) return -EINVAL;
+```
+
+比較：
+
+| API | 英文 | 優點 | 注意事項 |
 |---|---|---|---|
-| VFS char device | `cdev_init(&drv.cdev, &chardev_fops)` | `/dev/chardev0` open/read/write/ioctl/close | 使用 file position `*ppos` + global `drv`。 |
-| procfs | `proc_create(..., &chardev_proc_ops)` | `/proc/chardev_info` read | 使用 seq_file snapshot + global `drv`。 |
-| sysfs | `DEVICE_ATTR_*` + `ATTRIBUTE_GROUPS` + `dev_groups` | `/sys/class/chardev/chardev0/*` read/write | 每個 attribute 對應 show/store + global `drv`。 |
+| `kstrtoint()` | Kernel String To Integer | kernel 常用轉換 API，錯誤回傳明確 | 適合 sysfs store。 |
+| `sscanf()` | String Scan Format | 彈性高 | 格式錯誤判斷較容易寫得不精確。 |
+| `simple_strtol()` | Simple String To Long | 舊式 API | 新程式較不建議。 |
 
-#### dispatch model
+選擇依據：
 
-此 driver 的 dispatch model 是 Linux framework-driven，不是 driver 自己輪詢：
-
-- `/dev` path 由 VFS + cdev registry dispatch。
-- `/proc` path 由 procfs + seq_file dispatch。
-- `/sys` path 由 device model + generated attributes dispatch。
-
-#### resource management model
-
-相較於使用 `devm_*` 的 driver，這份 code 採完全手動 resource management。使用原因只能從 code 結構推得：這是 module-global char device，不是 platform device probe 生命週期，所以 source code 直接在 `chardev_init` 建立 resource，並在 `chardev_exit` / goto unwind 釋放。
+- sysfs 輸入是文字，`kstrtoint()` 讓錯誤處理簡單清楚。
 
 ---
 
-### 9. Debug / Risk Analysis
+### 9. Synchronization API
 
-#### Potential Memory Leak
+#### `mutex`
 
-- 正常 `chardev_exit` 有 `kfree(drv.buf)`，也有 `proc_remove`、`device_destroy`、`class_destroy`、`cdev_del`、`unregister_chrdev_region`。
-- init failure path 有分階段 unwind，從 source 來看已覆蓋 `alloc_chrdev_region`、`cdev_add`、`class_create`、`device_create`、`proc_create` 後的失敗釋放。
-- 目前程式碼中未觀察到其他 dynamic allocation 需要釋放。
+本專案用 `struct mutex lock` 保護：
 
-#### Invalid Ownership Transfer
+- `chardev_read()` 中的 buffer copy 與 file position 更新。
+- `chardev_write()` 中的 buffer copy 與 `buf_len` 更新。
+- `IOCTL_RESET_BUF` 中的 buffer 清空。
 
-- `copy_to_user` / `copy_from_user` 都是 copy semantics，沒有把 `drv.buf` pointer 交給 userspace 保存。
-- driver 不保存 userspace pointer；`arg` 只在 ioctl call 期間使用。
-- `filp->private_data` 未使用，因此沒有 per-open ownership 或 release mismatch。
+選擇 mutex 的原因：
 
-#### Callback Misuse Risk
+- `copy_to_user()` / `copy_from_user()` 可能睡眠。
+- mutex 允許睡眠。
+- spinlock 不允許在持鎖期間睡眠。
 
-- `proc_show` 使用 `seq_printf(m, "buf_content: %.*s\n", drv.buf_len, drv.buf)`，沒有 mutex。若同時有 write/reset，proc output 可能與更新交錯。
-- sysfs `read_only_store` 與 ioctl `IOCTL_SET_RDONLY` 都能改 `drv.read_only`，但沒有共同 locking。若兩邊同時寫，最後狀態由最後一次寫入決定；程式碼中未提供 ordering 保證。
-- `chardev_read` 的 EOF check 在 mutex 外，若同時 reset/write，`drv.buf_len` 可能在 check 與 locked copy 之間變化。這是從目前程式碼可見的同步範圍風險。
+#### `atomic_t`
 
-#### Lifecycle Mismatch
+本專案使用 `atomic_t` 計數：
 
-- `scripts/load.sh` 使用 `insmod ... || true`，module 載入失敗時 script 仍可能繼續顯示後續步驟；這可能讓 demo lifecycle 判讀混淆。
-- `scripts/unload.sh` 直接 `sudo rmmod chardev`，沒有 `|| true`。如果 module 未載入，script 會因 rmmod 失敗而中止，後續驗證與 make clean 不會執行。
-- `driver/Makefile` 的 `install` target 直接 `sudo insmod chardev.ko`，而 `scripts/load.sh` 先 make 再 insmod；兩者都可載入 module，但 error handling 不同。
+- `open_count`
+- `read_count`
+- `write_count`
 
-#### Concurrency Issue
+選擇 atomic 的原因：
 
-- `drv.buf` 的主要 read/write/reset path 使用 mutex，這是正面保護。
-- `drv.read_only` 沒有 mutex 或 atomic 保護，且可由 ioctl 與 sysfs 兩條 path 修改。
-- `drv.buf_len` 有些 path 在 mutex 內寫，但 proc/sysfs/ioctl GET_LEN 讀取時未加 mutex。
-- atomic counters 適合計數本身，但 counters 與 buffer state 不是同一個一致性 snapshot；procfs 同時印 counters 與 buffer 時，無法保證是同一瞬間狀態。
+- 單純整數遞增，不需要保護一整段複雜邏輯。
+- 比為了計數而拿 mutex 更簡潔。
 
-#### Userspace Test / Build Risk
+比較：
 
-- `userspace/test_app.c:62` 目前可見內容是以 `/*` 開頭、但同一行顯示為 `?/` 而不是標準 `*/`。若檔案實際內容也是如此，這段註解可能未正確關閉，會影響 userspace test 編譯。此處未執行 build；只能根據目前讀到的 source 標示風險。
-- `test_app.c` 在 `read()` 後直接 `rbuf[ret] = '\0'`。若 `read` 回傳負值，會用負 index 寫入；目前測試 path 預期成功，但程式碼沒有檢查 `ret < 0`。
-- `test_app.c` 使用 `lseek(fd, 0, SEEK_SET)`，driver 沒有自訂 `.llseek`。目前無法從 driver source 確認所有 lseek 行為，僅能確認 userspace test 依賴它。
+| 工具 | 英文 | 可否睡眠 | 適合 |
+|---|---|---|---|
+| `mutex` | Mutual Exclusion Lock | 可以 | user copy、較長臨界區。 |
+| `spinlock_t` | Spin Lock | 不可以 | 中斷上下文或極短臨界區。 |
+| `atomic_t` | Atomic Variable | 不適用 | 單一整數操作。 |
 
 ---
 
-## 補充：Interface / State 對照
+### 10. Error Handling API
 
-### ioctl Macro
+#### `IS_ERR()` / `PTR_ERR()`
 
-| Macro | 定義位置 | command number | driver 行為 |
-|---|---|---:|---|
-| `CHARDEV_MAGIC` | `driver/chardev.h:7` | `'k'` | `chardev_ioctl` 用 `_IOC_TYPE(cmd)` 驗證。 |
-| `IOCTL_RESET_BUF` | `driver/chardev.h:10` | 0 | 清空 `drv.buf`，`drv.buf_len = 0`。 |
-| `IOCTL_GET_LEN` | `driver/chardev.h:11` | 1 | 回傳 `drv.buf_len` 到 userspace int。 |
-| `IOCTL_SET_RDONLY` | `driver/chardev.h:12` | 2 | 從 userspace int 設定 `drv.read_only`。 |
-| `CHARDEV_MAGIC_MAX` | `driver/chardev.h:14` | 2 | `chardev_ioctl` 拒絕 nr > 2。 |
+`class_create()` 與 `device_create()` 回傳 pointer，但失敗時可能回傳 encoded error pointer。這類 API 不能只用 `NULL` 判斷。
 
-### External Interfaces
+```c
+drv.cls = class_create(...);
+if (IS_ERR(drv.cls)) {
+  ret = PTR_ERR(drv.cls);
+  goto err_cdev;
+}
+```
 
-| Interface | 建立來源 | callback / operation | 主要 state |
+比較：
+
+| 判斷方式 | 適用情境 |
+|---|---|
+| `if (!ptr)` | API 明確說失敗回傳 `NULL`，例如部分 allocation API。 |
+| `if (IS_ERR(ptr))` | API 失敗回傳 error pointer，例如 `class_create()`。 |
+| `if (ret < 0)` | API 回傳整數錯誤碼，例如 `alloc_chrdev_region()`。 |
+
+#### errno 回傳
+
+| errno | 英文 | 本專案使用位置 | 意義 |
 |---|---|---|---|
-| `/dev/chardev0` | `device_create` + cdev registration | `chardev_fops` | `drv.buf`、`drv.buf_len`、`drv.read_only`、counters |
-| `/proc/chardev_info` | `proc_create` | `chardev_proc_ops` -> `proc_show` | status snapshot |
-| `/sys/class/chardev/chardev0/buf_len` | `DEVICE_ATTR_RO(buf_len)` | `buf_len_show` | `drv.buf_len` |
-| `/sys/class/chardev/chardev0/read_only` | `DEVICE_ATTR_RW(read_only)` | `read_only_show/store` | `drv.read_only` |
-| `/sys/class/chardev/chardev0/stats` | `DEVICE_ATTR_RO(stats)` | `stats_show` | atomic counters |
+| `-ENOMEM` | Out of Memory | `kzalloc()` 或 `proc_create()` 失敗 | 記憶體或資源不足。 |
+| `-EACCES` | Permission Denied | read-only 模式下寫入 | driver 主動拒絕寫入。 |
+| `-EFAULT` | Bad Address | user copy 失敗 | user pointer 無效或無法完整複製。 |
+| `-EINVAL` | Invalid Argument | sysfs 輸入無法轉整數 | 輸入格式錯誤。 |
+| `-ENOTTY` | Inappropriate ioctl | ioctl command 不屬於本 driver | ioctl command 不支援。 |
+
+---
+
+## 第三階段：重點功能圖示
+
+### 1. 模組載入後建立三種外部介面
+
+```mermaid
+flowchart TD
+  A["insmod chardev.ko"]
+  B["chardev_init()"]
+  C["cdev_add()"]
+  D["device_create()"]
+  E["proc_create()"]
+  F["drv.cls->dev_groups"]
+  G["/dev/chardev0"]
+  H["/proc/chardev_info"]
+  I["/sys/class/chardev/chardev0/buf_len"]
+  J["/sys/class/chardev/chardev0/read_only"]
+  K["/sys/class/chardev/chardev0/stats"]
+
+  A --> B
+  B --> C --> G
+  B --> D --> G
+  B --> E --> H
+  B --> F --> I
+  F --> J
+  F --> K
+```
+
+### 2. `read_only` 同時可由 ioctl 與 sysfs 控制
+
+```mermaid
+flowchart LR
+  A["ioctl(fd, IOCTL_SET_RDONLY, &val)"]
+  B["copy_from_user(&val)"]
+  C["drv.read_only = !!val"]
+  D["echo 1 > /sys/.../read_only"]
+  E["kstrtoint(buf, 10, &val)"]
+  F["chardev_write()"]
+  G{"drv.read_only?"}
+  H["return -EACCES"]
+  I["copy_from_user(drv.buf)"]
+
+  A --> B --> C
+  D --> E --> C
+  C --> F --> G
+  G -- "yes" --> H
+  G -- "no" --> I
+```
+
+重點：
+
+- ioctl 與 sysfs 是兩個入口，但最後都改同一個 `drv.read_only`。
+- 所以除錯時要同時考慮兩邊是否曾經改過狀態。
+
+### 3. procfs 與 sysfs 的角色差異
+
+```mermaid
+flowchart TD
+  A["Driver global state<br/>drv"]
+  B["proc_show()"]
+  C["/proc/chardev_info<br/>multi-field report"]
+  D["buf_len_show()"]
+  E["/sys/.../buf_len<br/>single value"]
+  F["read_only_show/store()"]
+  G["/sys/.../read_only<br/>single setting"]
+  H["stats_show()"]
+  I["/sys/.../stats<br/>counter summary"]
+
+  A --> B --> C
+  A --> D --> E
+  A --> F --> G
+  A --> H --> I
+```
+
+---
+
+## 第四階段：BUG 分析與解法
+
+### BUG 1：Kernel headers / build directory 不存在
+
+#### 現象
+
+```text
+make[1]: *** /lib/modules/6.6.87.2-microsoft-standard-WSL2/build: No such file or directory. Stop.
+```
+
+#### 發生原因
+
+kernel module 是針對目前執行中的 kernel 建置。`driver/Makefile` 會找：
+
+```text
+/lib/modules/$(uname -r)/build
+```
+
+如果這個目錄不存在，代表系統沒有目前 kernel 的 build tree 或 headers。
+
+#### 解法
+
+一般 Ubuntu：
+
+```bash
+sudo apt install linux-headers-$(uname -r)
+```
+
+WSL：
+
+- Microsoft WSL kernel 常見沒有現成 headers。
+- 可改用一般 VM、安裝可對應 headers 的 kernel，或自行準備 WSL kernel source/build tree。
+
+#### 分析重點
+
+這不是 `chardev.c` 寫錯，而是建置環境沒有 kernel build system。除錯時要先分清楚「編譯環境問題」和「程式碼語法問題」。
+
+---
+
+### BUG 2：`Makefile` 使用 `$(PWD)` 導致 `M=` 指錯目錄
+
+#### 現象
+
+從專案根目錄執行：
+
+```bash
+make -C driver
+```
+
+可能看到 kernel build command 的 `M=` 指到專案根目錄，而不是 `driver` 目錄。
+
+#### 發生原因
+
+`PWD` 常來自 shell 環境變數。`make -C driver` 會切換 Make 的工作目錄，但 `PWD` 不一定同步更新。
+
+#### 解法
+
+改用 GNU Make 的 `$(CURDIR)`：
+
+```make
+$(MAKE) -C $(KDIR) M=$(CURDIR) modules
+```
+
+#### 分析重點
+
+外部 kernel module build 很依賴 `M=`。`M=` 指向哪裡，kernel build system 就去哪裡找 module source 與 `Makefile`。
+
+---
+
+### BUG 3：`class_create()` 在不同 kernel 版本編譯失敗
+
+#### 現象
+
+可能出現：
+
+```text
+too many arguments to function 'class_create'
+```
+
+或：
+
+```text
+too few arguments to function 'class_create'
+```
+
+#### 發生原因
+
+Linux kernel API 會隨版本調整。`class_create()` 曾經需要 `THIS_MODULE` 參數，較新的 kernel 則移除此參數。
+
+#### 解法
+
+用 `LINUX_VERSION_CODE` 判斷：
+
+```c
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+  drv.cls = class_create(CLASS_NAME);
+#else
+  drv.cls = class_create(THIS_MODULE, CLASS_NAME);
+#endif
+```
+
+#### 分析重點
+
+driver 開發不能只記 API 名稱，也要注意 kernel version。文件和註解應該說明為什麼有條件編譯，否則下一位維護者可能誤刪。
+
+---
+
+### BUG 4：`write()` 後直接 `read()` 讀不到資料
+
+#### 現象
+
+使用同一個 fd：
+
+```c
+write(fd, "abc", 3);
+read(fd, buf, sizeof(buf));
+```
+
+可能讀到 `0` bytes。
+
+#### 發生原因
+
+`write()` 後 file position 在資料尾端。`read()` 會從目前 position 開始讀，若已在尾端就得到 EOF。
+
+#### 解法
+
+```c
+lseek(fd, 0, SEEK_SET);
+read(fd, buf, sizeof(buf));
+```
+
+#### 分析重點
+
+這是 VFS file position 的語意，不是 buffer 沒寫進去。測試 driver 時要確認 fd position。
+
+---
+
+### BUG 5：`Permission denied` 可能不是檔案權限問題
+
+#### 現象
+
+```bash
+echo "abc" > /dev/chardev0
+bash: /dev/chardev0: Permission denied
+```
+
+#### 發生原因
+
+可能原因：
+
+1. `/dev/chardev0` 權限不足。
+2. `read_only` 被設為 `1`，driver 回傳 `-EACCES`。
+
+#### 解法
+
+```bash
+ls -l /dev/chardev0
+cat /sys/class/chardev/chardev0/read_only
+echo 0 | sudo tee /sys/class/chardev/chardev0/read_only
+```
+
+#### 分析重點
+
+Shell 只顯示系統呼叫失敗後的 errno 文字，不會主動說明 errno 是由 VFS 權限檢查產生，還是由 driver callback 回傳。
+
+---
+
+### BUG 6：狀態快照可能不完全一致
+
+#### 現象
+
+同時執行大量 `write()` 與：
+
+```bash
+cat /proc/chardev_info
+cat /sys/class/chardev/chardev0/buf_len
+```
+
+可能看到某些欄位來自不同時間點。
+
+#### 發生原因
+
+目前 buffer read/write/reset path 有 mutex，但 procfs/sysfs/ioctl 的部分觀察路徑沒有全部使用同一把 lock。
+
+#### 解法方向
+
+如果要強化一致性，可考慮：
+
+- `proc_show()` 讀取 `buf_len` 與 `buf` 時也取得 `drv.lock`。
+- `IOCTL_GET_LEN` 與 `buf_len_show()` 讀 `buf_len` 時取得一致的鎖。
+- `read_only` 若只需要簡單旗標，可考慮使用 atomic 或用同一把 mutex 保護。
+
+#### 分析重點
+
+教學 driver 可以接受較簡潔的同步策略；實務 driver 要根據資料一致性需求決定鎖的範圍。
+
+---
+
+## 第五階段：API 選擇總表
+
+| 需求 | 本專案選用 | 可替代 API | 選擇原因 |
+|---|---|---|---|
+| 建立可載入模組 | `module_init()` / `module_exit()` | initcall | out-of-tree module 最直接。 |
+| 配置小型 kernel buffer | `kzalloc()` | `kmalloc()`、`vmalloc()` | buffer 小，且需要清零。 |
+| 取得 major/minor | `alloc_chrdev_region()` | `register_chrdev_region()` | 不需要固定 major，動態配置較安全。 |
+| 註冊字元裝置 | `cdev_init()` / `cdev_add()` | `misc_register()` | 可完整示範 char device 流程。 |
+| 建立 `/dev` 節點 | `class_create()` / `device_create()` | `mknod` | 交給 device model 與 udev 管理。 |
+| 使用者資料複製 | `copy_from_user()` / `copy_to_user()` | `memcpy()` | user pointer 需要安全檢查。 |
+| 控制命令 | `ioctl()` | sysfs、write command string | ioctl 適合 C 程式的結構化控制命令。 |
+| 狀態報告 | procfs + `seq_file` | debugfs、sysfs 多檔案 | procfs 適合一次輸出多欄位診斷資訊。 |
+| 裝置屬性 | sysfs + `DEVICE_ATTR_*` | procfs write、ioctl | sysfs 適合單一屬性讀寫。 |
+| buffer 同步 | `mutex` | `spinlock_t` | user copy 可能睡眠，不能用 spinlock。 |
+| 計數器 | `atomic_t` | mutex-protected int | 單純遞增用 atomic 較清楚。 |
+
+---
+
+## 第六階段：實際範例
+
+### 1. 檢查 driver 是否載入
+
+```bash
+lsmod | grep chardev
+dmesg | grep chardev | tail
+```
+
+### 2. 寫入與讀取 buffer
+
+```bash
+echo "hello api" > /dev/chardev0
+cat /dev/chardev0
+```
+
+對應 callback：
+
+```text
+echo -> write() -> chardev_write()
+cat  -> read()  -> chardev_read()
+```
+
+### 3. 取得狀態
+
+```bash
+cat /proc/chardev_info
+cat /sys/class/chardev/chardev0/buf_len
+cat /sys/class/chardev/chardev0/stats
+```
+
+對應 callback：
+
+```text
+/proc/chardev_info -> proc_show()
+/sys/.../buf_len   -> buf_len_show()
+/sys/.../stats     -> stats_show()
+```
+
+### 4. 控制唯讀模式
+
+sysfs：
+
+```bash
+echo 1 | sudo tee /sys/class/chardev/chardev0/read_only
+echo 0 | sudo tee /sys/class/chardev/chardev0/read_only
+```
+
+ioctl：
+
+```c
+int rdonly = 1;
+ioctl(fd, IOCTL_SET_RDONLY, &rdonly);
+```
+
+選擇方式：
+
+- Shell 或人工測試：sysfs 較方便。
+- C 程式內部控制：ioctl 較直接。
 
 ---
 
 ## 結論
 
-`chardev-driver` 目前是一個 module-global state 的 character device demo。它的核心 execution semantics 是：module load 時一次性配置 `drv.buf`、註冊 dev_t/cdev/class/device/proc entry；runtime 由 VFS、procfs、sysfs 三種 framework 間接 dispatch 到各自 callback；所有外部介面都讀寫同一個 global `drv` 狀態。
+`chardev-driver` 的 API 設計可以分成三層理解：
 
-ownership/lifecycle 上，此專案沒有 devm-managed resource，而是完全手動註冊與反註冊。正常 exit 與 init failure unwind 都可追溯到對應 cleanup。主要風險集中在 shared state 的同步範圍：buffer copy/reset 有 mutex，但 `read_only`、部分 `buf_len` 讀取與 proc/sysfs snapshot 沒有同一把 lock 保護；另外 userspace test 目前可見註解疑似未正確關閉，且 read error handling 不完整。
+1. **註冊層 (Registration Layer)**：`alloc_chrdev_region()`、`cdev_add()`、`class_create()`、`device_create()`、`proc_create()` 讓 driver 對外可見。
+2. **執行層 (Runtime Layer)**：VFS、procfs、sysfs 透過 callback table 間接呼叫 driver 函式。
+3. **資料層 (Data Layer)**：`drv.buf`、`drv.buf_len`、`drv.read_only`、atomic counters 保存狀態，並用 `copy_*_user()`、mutex、atomic 保護基本操作。
+
+這份專案的價值在於它把字元裝置常見的幾個介面放在同一個可測試範例中。讀懂這份程式後，再往 blocking I/O、poll/epoll、multi-minor、interrupt handling、DMA 或 platform driver 前進，會比較容易掌握 Linux driver 的基本脈絡。

@@ -44,7 +44,9 @@ Statistics / Result
 
 重點觀念是：主機只知道邏輯位址，例如 LBA 100；SSD 內部實際寫到哪一個 block、哪一個 page，則由 FTL 決定。
 
-## 快速開始
+## 快速開始（最短流程）
+
+這段適合先確認環境能不能跑起來。若你第一次看這個專案，建議先照順序跑一次，再往下看「建置流程詳解」與「DEMO 流程」。
 
 建置主程式：
 
@@ -81,6 +83,352 @@ make test
 ```bash
 make clean
 ```
+
+## 建置流程詳解
+
+建置流程的目的，是把 `src/*.c` 原始碼編譯成可執行檔 `ssd_fw_sim`，並確認程式在嚴格編譯選項下沒有警告或錯誤。
+
+### 建置相關關鍵字
+
+| 關鍵字 | 英文 | 涵義 |
+|--------|------|------|
+| 建置 | Build | 將原始碼轉成可執行檔的完整流程 |
+| 編譯 | Compile | 將單一 `.c` 檔轉成 `.o` 物件檔 |
+| 連結 | Link | 將多個 `.o` 物件檔合成執行檔 |
+| 目標 | Target | Makefile 中可執行的任務，例如 `all`、`test`、`clean` |
+| 物件檔 | Object File | 編譯後的中間檔，副檔名通常是 `.o` |
+| 執行檔 | Executable | 可以直接執行的程式，本專案是 `ssd_fw_sim` |
+| 編譯旗標 | Compiler Flags | 控制編譯規則的參數，例如 `-Wall`、`-Werror` |
+| 回歸測試 | Regression Test | 確認修改後舊功能沒有壞掉的測試 |
+
+### Makefile 主要目標
+
+| 指令 | 目的 | 為什麼要做 |
+|------|------|------------|
+| `make` | 建置主程式 `ssd_fw_sim` | 產生可執行的 SSD 模擬器 |
+| `make test` | 建置並執行 `ssd_fw_sim_tests` | 確認 queue、FTL、GC、config、latency 邏輯仍正確 |
+| `make clean` | 刪除 `build/`、`ssd_fw_sim`、`ssd_fw_sim_tests` | 回到乾淨狀態，避免舊物件檔影響判斷 |
+
+### 建置流程圖
+
+```text
+include/*.h      src/*.c
+     |              |
+     +------ make --+
+              |
+              v
+        build/*.o
+              |
+              v
+        ssd_fw_sim
+```
+
+`include/*.h` 是標頭檔，定義資料結構與 API；`src/*.c` 是實作檔。`make` 會先把每個 `.c` 編譯成 `build/*.o`，再把所有物件檔連結成 `ssd_fw_sim`。
+
+### Step 1：建置主程式
+
+```bash
+make
+```
+
+目的：
+
+- 產生 `ssd_fw_sim`。
+- 確認所有 C 原始碼能通過 `-std=c11 -Wall -Wextra -Werror -pedantic`。
+
+原因：
+
+- `-Wall` 和 `-Wextra` 會打開較多警告。
+- `-Werror` 會把警告視為錯誤，避免小問題被忽略。
+- `-pedantic` 會讓程式更接近標準 C，不依賴太多編譯器特例。
+
+成功後，專案根目錄會出現：
+
+```text
+ssd_fw_sim
+build/
+```
+
+### Step 2：執行回歸測試
+
+```bash
+make test
+```
+
+目的：
+
+- 建置 `ssd_fw_sim_tests`。
+- 執行 `tests/test_suite.c` 內的測試案例。
+
+這些測試會檢查：
+
+| 測試方向 | 檢查重點 |
+|----------|----------|
+| Config | 不合法 SSD 幾何與設定檔格式會被拒絕 |
+| NVMe SQ/CQ | submission queue 與 completion queue 的滿佇列、出隊、完成流程 |
+| Scheduler | request 會被處理並產生 completion |
+| FTL | 越界 LBA 不會寫入 NAND |
+| GC | 搬移 valid page 後 L2P mapping 仍指向有效 page |
+| Latency | `queue latency + service latency = total latency` |
+
+原因：
+
+- SSD 模擬器有多個狀態表，例如 SQ/CQ、L2P mapping、NAND page state、free block pool。
+- 只看程式能編譯不夠，還要確認狀態轉換沒有壞掉。
+
+成功時會看到：
+
+```text
+All tests passed
+```
+
+### Step 3：清除建置產物
+
+```bash
+make clean
+```
+
+目的：
+
+- 刪除編譯後的中間檔與執行檔。
+
+原因：
+
+- 若你想確認專案能從零開始建置，先 `make clean` 再 `make` 最清楚。
+- 若要提交程式碼，通常不需要把 `build/` 或執行檔一起提交。
+
+## DEMO 流程
+
+DEMO 的目的，是用一小段 trace 觀察 SSD 寫入路徑如何運作，並從輸出統計理解 queue、FTL、NAND、GC 的關係。
+
+建議照下面順序跑：
+
+```text
+建置程式
+  |
+  v
+跑 sample trace
+  |
+  v
+看統計輸出
+  |
+  v
+改 config 或產生新 trace
+  |
+  v
+比較結果差異
+```
+
+### DEMO 1：使用內建 sample trace
+
+指令：
+
+```bash
+make
+./ssd_fw_sim traces/sample.trace
+```
+
+目的：
+
+- 用最小成本確認模擬器能讀取 trace 並跑完整條 write path。
+
+原因：
+
+- `traces/sample.trace` 已經放在專案內，不需要另外產生 workload。
+- 適合第一次確認程式是否能正常執行。
+
+`traces/sample.trace` 內容類似：
+
+```text
+WRITE 0 4
+WRITE 8 4
+WRITE 16 8
+WRITE 0 2
+```
+
+這代表 host 依序送出多筆 write request。`WRITE 0 2` 會覆寫前面寫過的 LPN 0、1，因此可以觀察 out-of-place update 造成舊 page invalid 的效果。
+
+### DEMO 1 的執行流程圖
+
+```text
+./ssd_fw_sim traces/sample.trace
+  |
+  v
+main.c 讀取 trace
+  |
+  v
+nvme_submit_write()
+  |
+  v
+nvme_issue_pending()
+  |
+  v
+scheduler_run()
+  |
+  v
+ftl_handle_request()
+  |
+  v
+nand_program_page()
+  |
+  v
+nvme_post_completion()
+  |
+  v
+stats_print()
+```
+
+### DEMO 1 要看哪些輸出
+
+執行後會先看到 SSD 設定：
+
+```text
+=== SSD Configuration ===
+total_blocks           : 128
+pages_per_block        : 64
+logical_pages          : 4096
+request_queue_depth    : 256
+gc_free_block_threshold: 8
+```
+
+這段代表目前模擬的 SSD 幾何與延遲設定。
+
+接著會看到統計：
+
+```text
+=== SSD Statistics ===
+Host Requests          : 7
+Host Pages             : 46
+NAND Writes            : 46
+NAND Reads             : 0
+NAND Erases            : 0
+GC Count               : 0
+Write Amplification    : 1.00
+```
+
+讀法：
+
+| 輸出 | 代表什麼 | 為什麼重要 |
+|------|----------|------------|
+| `Host Requests` | trace 中成功處理的 request 數 | 用來確認輸入 workload 規模 |
+| `Host Pages` | host 要求寫入的 page 總數 | WA 的分母 |
+| `NAND Writes` | 實際 NAND program 次數 | WA 的分子，包含 GC 搬移 |
+| `NAND Reads` | GC 搬移 valid page 時的 read 次數 | 沒有 GC 時通常是 0 |
+| `NAND Erases` | block erase 次數 | 代表是否發生 GC |
+| `GC Count` | GC 成功執行次數 | 用來觀察空間壓力 |
+| `Write Amplification` | 實際寫入量 / host 寫入量 | 衡量 GC 與搬移成本 |
+
+如果 `GC Count = 0`、`Write Amplification = 1.00`，代表 sample trace 還沒有把空間壓到需要 GC，因此 NAND 實際寫入量等於 host 寫入量。
+
+### DEMO 2：輸出 CSV 方便比較
+
+指令：
+
+```bash
+./ssd_fw_sim --csv stats.csv traces/sample.trace
+```
+
+目的：
+
+- 將統計結果輸出成 `stats.csv`，方便用試算表或腳本比較不同 workload。
+
+原因：
+
+- 終端機輸出適合快速閱讀。
+- CSV 適合做多組實驗比較，例如比較不同 `gc_free_block_threshold` 對 WA 的影響。
+
+關鍵字：
+
+| 關鍵字 | 英文 | 涵義 |
+|--------|------|------|
+| CSV | Comma-Separated Values | 以逗號分隔欄位的文字表格格式 |
+| Metric | Metric | 可量化的觀察指標，例如 WA、latency、GC count |
+| Workload | Workload | 一組輸入請求，這裡就是 trace 檔 |
+
+### DEMO 3：使用自訂設定檔
+
+指令：
+
+```bash
+./ssd_fw_sim --config ssd.conf traces/sample.trace
+```
+
+目的：
+
+- 用 `ssd.conf` 覆寫預設 SSD 幾何與延遲。
+
+原因：
+
+- 不同 SSD 容量、block/page 配置、GC 門檻會影響統計結果。
+- 將設定放在檔案中，比直接改程式碼更容易重複實驗。
+
+建議觀察：
+
+| 想觀察的行為 | 可調整的 key | 預期影響 |
+|--------------|--------------|----------|
+| 讓 GC 更容易出現 | 降低 `total_blocks` 或提高寫入量 | free block 較快不足 |
+| 提早做背景 GC | 提高 `gc_free_block_threshold` | foreground GC 機率下降，但 GC 可能更早發生 |
+| 放大 erase 對延遲的影響 | 提高 `erase_latency_us` | GC 發生時 total latency 會更明顯 |
+| 模擬 host 較慢送 request | 提高 `trace_inter_arrival_us` | queue latency 可能下降 |
+
+注意：
+
+- `logical_pages` 不可大於 `total_blocks * pages_per_block`。
+- `gc_free_block_threshold` 必須介於 1 到 `total_blocks - 1`。
+- value 只能寫數字，例如 `program_latency_us=200`，不要寫 `200us`。
+
+### DEMO 4：產生自己的 trace
+
+指令：
+
+```bash
+python3 scripts/gen_trace.py --mode mixed --count 100 --max-lba 4096 --max-size 8 --output traces/demo.trace
+./ssd_fw_sim traces/demo.trace
+```
+
+目的：
+
+- 產生新的 workload，觀察不同寫入型態對 SSD 統計的影響。
+
+原因：
+
+- Sequential write 和 random write 對 FTL 與 GC 的壓力不同。
+- 自訂 trace 可以讓你做可重複的實驗，而不是只看固定 sample。
+
+模式說明：
+
+| 模式 | 英文 | 行為 |
+|------|------|------|
+| `sequential` | Sequential Workload | LBA 連續往後寫，接近循序寫入 |
+| `random` | Random Workload | 每筆 request 隨機選 LBA，容易造成覆寫與 invalid page |
+| `mixed` | Mixed Workload | 混合循序與隨機寫入，較接近一般使用情境 |
+
+新手建議：
+
+- 先用 `--count 100` 或 `--count 1000`，避免輸出太大不易觀察。
+- 若想更容易看到 GC，可搭配較小的設定檔，例如降低 `total_blocks`。
+
+### DEMO 5：完整建置與驗證流程
+
+如果要展示整個專案從乾淨狀態到可執行、可驗證、可輸出結果，可照這個順序：
+
+```bash
+make clean
+make
+make test
+./ssd_fw_sim --config ssd.conf --csv stats.csv traces/sample.trace
+```
+
+每一步的目的：
+
+| 步驟 | 目的 |
+|------|------|
+| `make clean` | 清掉舊建置結果，確保接下來不是吃到舊檔 |
+| `make` | 建置主程式 |
+| `make test` | 驗證核心模組沒有壞掉 |
+| `./ssd_fw_sim ...` | 跑 DEMO workload 並輸出統計 |
+
+這條流程適合用來確認「程式能從零建置、測試能通過、範例能執行、結果能保存」。
 
 ## Trace 格式
 

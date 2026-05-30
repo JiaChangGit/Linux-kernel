@@ -107,6 +107,24 @@ sudo apt install -y build-essential linux-headers-$(uname -r) kmod gcc make bc
 
 補充：`bc` 是 `scripts/03_benchmark.sh` 用來計算資料量的工具。若只直接執行 `user/benchmark`，不一定需要 `bc`。
 
+這些套件的目的：
+
+| 套件 / 關鍵字 | English | 目的 | 為什麼需要 |
+| --- | --- | --- | --- |
+| `build-essential` | Build Essential Tools | 安裝基本 C/C++ 編譯工具。 | user-space 程式與部分建置流程需要 `gcc`、`make` 等工具。 |
+| `linux-headers-$(uname -r)` | Linux Kernel Headers | 提供目前執行中 kernel 的標頭檔與 Kbuild 設定。 | kernel module 必須用「目前這顆 kernel」對應的 headers 編譯，否則容易載入失敗。 |
+| `kmod` | Kernel Module Tools | 提供 `insmod`、`rmmod`、`lsmod` 等工具。 | 本專案會載入與卸載 `.ko` kernel module。 |
+| `gcc` | GNU C Compiler | 編譯 user-space C 程式。 | `mq_demo`、`shm_demo`、`benchmark` 都是 C 程式。 |
+| `make` | Build Automation Tool | 依照 Makefile 執行建置規則。 | 專案用 Makefile 管理 kernel 與 user 兩邊的建置。 |
+| `bc` | Basic Calculator | 在 shell script 中做小數運算。 | benchmark script 會用它計算測試資料量 MB。 |
+
+關鍵字補充：
+
+- **Kernel headers**：kernel module 不是一般程式。它會連到 kernel 內部 API，所以編譯時需要和目前 kernel 版本相符的 headers。
+- **Kbuild**：Linux kernel 官方的建置系統。`kernel/Makefile` 不是直接用 `gcc` 編譯 `.c`，而是把工作交給 `/lib/modules/$(uname -r)/build`。
+- **`.ko`**：Kernel Object，編譯完成的 kernel module 檔案。此專案會產生 `mq_module.ko` 與 `shm_module.ko`。
+- **root 權限**：載入 kernel module 會改變 kernel runtime 狀態，所以需要 `sudo`。
+
 ---
 
 ## 5. 建置、載入與執行
@@ -117,12 +135,68 @@ sudo apt install -y build-essential linux-headers-$(uname -r) kmod gcc make bc
 sudo bash scripts/01_setup.sh
 ```
 
+這個步驟的目的，是把「原始碼」變成「可以被 kernel 載入、可以被 user program 操作」的完整測試環境。
+
+整體流程如下：
+
+```text
+README 指令
+  -> scripts/01_setup.sh
+     -> 檢查 root 權限
+     -> 安裝建置依賴
+     -> 編譯 kernel modules
+     -> 編譯 user-space programs
+     -> insmod 載入 modules
+     -> 建立 /dev/mq_ipc、/dev/shm_ipc
+     -> 建立 /proc/mq_stats、/proc/shm_stats
+```
+
 此腳本會做四件事：
 
 1. 檢查 root 權限
 2. 安裝或確認建置套件
 3. 編譯 kernel modules 與 user programs
 4. 載入 `mq_module.ko`、`shm_module.ko`，並建立 `/dev/mq_ipc`、`/dev/shm_ipc`
+
+### 5.1 `01_setup.sh` 每一步在做什麼
+
+| 階段 | 腳本動作 | 目的 | 原因 |
+| --- | --- | --- | --- |
+| 0. root check | 檢查 `$EUID` 是否為 0 | 確認有權限載入 kernel module。 | `insmod`、修改 `/dev` 權限都需要 root。 |
+| 1. 顯示環境 | 顯示 `uname -r` 與 OS 版本 | 確認目前 kernel 版本。 | kernel headers 必須和正在跑的 kernel 對應。 |
+| 2. 安裝依賴 | `apt-get install build-essential linux-headers... kmod` | 準備編譯與 module 管理工具。 | 少了 headers 會無法編 kernel module；少了 kmod 會無法載入 module。 |
+| 3. 編譯 kernel | `make -C "${PROJECT_DIR}" kernel` | 產生 `mq_module.ko`、`shm_module.ko`。 | `.ko` 是 kernel 可載入的 module 格式。 |
+| 4. 編譯 user | `make -C "${PROJECT_DIR}" user` | 產生 `mq_demo`、`shm_demo`、`benchmark`。 | demo 與 benchmark 是用來操作 `/dev/*` 的 user-space 程式。 |
+| 5. 載入 module | `insmod kernel/*.ko` | 把 IPC 實作加入目前 kernel runtime。 | 未載入前，不會有 `/dev/mq_ipc` 與 `/dev/shm_ipc`。 |
+| 6. 設定權限 | `chmod 666 /dev/mq_ipc /dev/shm_ipc` | 讓測試程式可以開啟裝置。 | character device 預設權限可能只允許 root 使用。 |
+| 7. 驗證狀態 | `lsmod`、`ls -lh /dev/*`、`cat /proc/*_stats` | 確認 module、device、stats 都存在。 | 建置成功不代表載入成功；這一步確認 runtime 狀態。 |
+
+### 5.2 建置後會產生什麼
+
+| 產物 | 位置 | 用途 |
+| --- | --- | --- |
+| `mq_module.ko` | `kernel/mq_module.ko` | Message Queue kernel module，提供 `/dev/mq_ipc`。 |
+| `shm_module.ko` | `kernel/shm_module.ko` | Shared Memory kernel module，提供 `/dev/shm_ipc` 與 `mmap()`。 |
+| `mq_demo` | `user/mq_demo` | 少量訊息佇列 demo，方便逐筆觀察。 |
+| `shm_demo` | `user/shm_demo` | shared memory mmap demo，觀察直接讀寫 mapped pages。 |
+| `benchmark` | `user/benchmark` | 三種 IPC 路徑的吞吐量測試。 |
+
+### 5.3 載入後會出現什麼 runtime 介面
+
+| 介面 | English | 目的 | 如何使用 |
+| --- | --- | --- | --- |
+| `/dev/mq_ipc` | Character Device | MQ 的 user/kernel 入口。 | user 程式用 `open()`、`write()`、`read()` 操作。 |
+| `/dev/shm_ipc` | Character Device | SHM 的 user/kernel 入口。 | user 程式可用 `read()` / `write()`，也可用 `mmap()`。 |
+| `/proc/mq_stats` | procfs Stats File | 觀察 MQ module 內部統計。 | `cat /proc/mq_stats` 或 `watch -n 1 cat /proc/mq_stats`。 |
+| `/proc/shm_stats` | procfs Stats File | 觀察 SHM module 內部統計。 | `cat /proc/shm_stats` 或 `watch -n 1 cat /proc/shm_stats`。 |
+
+關鍵字補充：
+
+- **`insmod`**：把 `.ko` 檔載入目前 kernel。載入成功後，`module_init()` 會被呼叫。
+- **`lsmod`**：列出目前已載入的 kernel modules。可用來確認 `mq_module`、`shm_module` 是否存在。
+- **`/dev`**：device node 所在目錄。user program 開啟 `/dev/mq_ipc` 時，會進入 kernel module 註冊的 `file_operations`。
+- **`/proc`**：kernel 暴露狀態資訊的虛擬檔案系統。本專案用它顯示統計，不拿來傳資料。
+- **`chmod 666`**：讓所有使用者可讀寫該 device node。這是為了測試方便；正式系統通常會設計更嚴格的權限。
 
 確認裝置是否存在：
 
@@ -131,6 +205,13 @@ ls -lh /dev/mq_ipc /dev/shm_ipc
 cat /proc/mq_stats
 cat /proc/shm_stats
 ```
+
+如果這四個檢查都正常，代表：
+
+1. kernel modules 已載入。
+2. character devices 已建立。
+3. `/proc` 統計介面已建立。
+4. user-space demo 與 benchmark 已經有可操作的 IPC 入口。
 
 ---
 
@@ -142,10 +223,137 @@ demo 的訊息數很少，適合先理解資料怎麼流動：
 sudo bash scripts/02_demo.sh
 ```
 
-你會看到兩段：
+demo 的目的不是測極限效能，而是讓你用少量訊息看懂兩種 IPC 路徑怎麼工作。建議先跑 demo，再跑 benchmark。
+
+`02_demo.sh` 會分成兩段，並在每段執行前停下來等你按 Enter：
 
 - `mq_demo`：使用 `write()` 將訊息送進 `kfifo`，再用 `read()` 取出。
 - `shm_demo`：使用 `mmap()` 取得 shared region 指標，直接寫入 `data[head]`、讀取 `data[tail]`。
+
+### 6.1 DEMO 流程總覽
+
+```text
+scripts/02_demo.sh
+  -> 檢查 /dev/mq_ipc 與 /dev/shm_ipc 是否存在
+  -> Part 1: 執行 user/mq_demo
+       -> open("/dev/mq_ipc")
+       -> write() 8 筆訊息
+       -> read()  8 筆訊息
+       -> cat /proc/mq_stats
+  -> Part 2: 執行 user/shm_demo
+       -> open("/dev/shm_ipc")
+       -> mmap() shared ring
+       -> 直接寫入 data[head]
+       -> 直接讀取 data[tail]
+       -> cat /proc/shm_stats
+  -> 最後並排顯示兩份 /proc 統計
+```
+
+### 6.2 Part 1：`mq_demo` 的目的與資料路徑
+
+`mq_demo` 要示範傳統 syscall 形式的訊息傳遞。它把每筆訊息寫到 `/dev/mq_ipc`，kernel module 會把資料放進 `kfifo`，再由 read path 取回。
+
+```text
+mq_demo
+  -> write(fd, msg, 64)
+     -> mq_write()
+        -> copy_from_user()
+        -> kfifo_in()
+
+  -> read(fd, buf, 64)
+     -> mq_read()
+        -> kfifo_out()
+        -> copy_to_user()
+```
+
+為什麼要看這段：
+
+- 它展示 user program 無法直接碰 kernel FIFO，必須透過 syscall。
+- 它展示資料會被複製進 kernel，再複製回 user。
+- 它展示 Message Queue 的 FIFO 順序：先寫入的訊息會先讀出。
+
+`mq_demo` 輸出中的關鍵字：
+
+| 關鍵字 | English | 涵義 |
+| --- | --- | --- |
+| `Producer` | Producer | 生產者，負責送出訊息。 |
+| `Consumer` | Consumer | 消費者，負責取出訊息。 |
+| `enq` | Enqueue | 將訊息放入佇列。 |
+| `deq` | Dequeue | 從佇列取出訊息。 |
+| `kfifo` | Kernel FIFO | kernel 內建 FIFO buffer，本專案用它保存 MQ 訊息。 |
+| `copy_from_user` | Copy From User | 從 user buffer 安全複製資料到 kernel。 |
+| `copy_to_user` | Copy To User | 從 kernel 安全複製資料回 user buffer。 |
+
+可以觀察 `/proc/mq_stats`：
+
+| 欄位 | 意義 | 怎麼判讀 |
+| --- | --- | --- |
+| `enqueue_count` | 寫入 FIFO 的訊息數 | 跑完 demo 後應該增加。 |
+| `dequeue_count` | 從 FIFO 讀出的訊息數 | 若 demo 完整讀完，通常會和 enqueue 接近。 |
+| `fifo_used_bytes` | FIFO 目前使用量 | demo 結束且資料都讀完時通常會回到 0。 |
+| `fifo_free_bytes` | FIFO 剩餘空間 | 可用來理解 queue 是否接近滿。 |
+
+### 6.3 Part 2：`shm_demo` 的目的與資料路徑
+
+`shm_demo` 要示範 zero-copy 的核心想法：先用 `mmap()` 建立 shared memory mapping，之後每筆訊息直接寫進 shared ring。
+
+```text
+shm_demo
+  -> mmap("/dev/shm_ipc")
+     -> shm_mmap()
+        -> remap_pfn_range()
+        -> user 取得 shm_region_t *
+
+  -> producer:
+       shm->data[head] = message
+       memory barrier
+       shm->head.value = next
+
+  -> consumer:
+       等待 head != tail
+       memory barrier
+       讀取 shm->data[tail]
+       shm->tail.value = next
+```
+
+為什麼要看這段：
+
+- 它展示 `mmap()` 只負責建立映射，不是每筆訊息都呼叫 kernel。
+- 它展示 shared memory 的速度來源：少掉每筆 `copy_from_user()` / `copy_to_user()`。
+- 它也展示 shared memory 的責任：使用者程式要自己管理 `head`、`tail`、full/empty 判斷與 memory barrier。
+
+`shm_demo` 輸出中的關鍵字：
+
+| 關鍵字 | English | 涵義 |
+| --- | --- | --- |
+| `mmap OK` | Mapping Success | user program 已取得 shared ring 的虛擬位址。 |
+| `userspace ptr` | Userspace Pointer | `mmap()` 回傳的指標，指向 user address space 中的 mapped region。 |
+| `slot` | Ring Slot | ring buffer 中的一格，每格存一筆固定 64 bytes 訊息。 |
+| `head` | Head Index | 下一個寫入位置。producer 成功寫入後會推進它。 |
+| `tail` | Tail Index | 下一個讀取位置。consumer 成功讀取後會推進它。 |
+| `memory barrier` | Memory Barrier | 確保資料內容先可見，再更新 `head` 或讀取資料。 |
+
+可以觀察 `/proc/shm_stats`：
+
+| 欄位 | 意義 | 怎麼判讀 |
+| --- | --- | --- |
+| `ring_capacity` | ring slot 總數 | 本專案預設 512。 |
+| `mmap_size_bytes` | mmap 暴露給 user 的大小 | 用來確認 shared region 映射大小。 |
+| `ring_used_slots` | ring 目前有多少 slot 被使用 | demo 結束且資料讀完時通常接近 0。 |
+| `ring_free_slots` | ring 剩餘可寫 slot | ring 滿時 producer 需要等待。 |
+| `write_count` / `read_count` | syscall path 統計 | mmap path 每筆訊息不一定會增加這兩個欄位，因為它不走 `shm_write()` / `shm_read()`。 |
+
+### 6.4 為什麼 demo 要拆成 MQ 與 SHM mmap
+
+| 比較點 | `mq_demo` | `shm_demo` |
+| --- | --- | --- |
+| 入口 | `write()` / `read()` | `mmap()` 後直接讀寫指標 |
+| 資料是否每筆進 kernel | 是 | 否，只有建立映射時進 kernel |
+| user/kernel copy | 有 | 沒有 `copy_from_user()` / `copy_to_user()` |
+| 同步責任 | kernel queue 與 wait queue 負責較多 | user-space ring protocol 負責較多 |
+| 適合觀察 | FIFO、enqueue/dequeue、syscall copy | head/tail、slot、zero-copy |
+
+先看 demo 的好處是：benchmark 數字出現前，你已經知道每個數字背後代表哪條資料路徑。
 
 若想分開跑：
 
@@ -154,6 +362,8 @@ cd user
 ./mq_demo
 ./shm_demo
 ```
+
+分開跑時要注意：仍然要先執行 `sudo bash scripts/01_setup.sh`，因為 demo 需要 `/dev/mq_ipc`、`/dev/shm_ipc` 已存在。
 
 ---
 

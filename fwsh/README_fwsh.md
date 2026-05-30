@@ -57,6 +57,17 @@
 | CRC-32 | Cyclic Redundancy Check 32-bit | 常用的資料完整性檢查碼。韌體更新、封包傳輸、映像檔驗證都常見。 |
 | Hexdump | Hexadecimal Dump | 以十六進位和 ASCII 對照方式顯示二進位內容，方便觀察檔頭、字串、填充值。 |
 | 實體記憶體圖 | Physical Memory Map | 系統實體位址空間配置。Linux 可從 `/proc/iomem` 觀察。 |
+| 編譯器 | Compiler | 將 C 原始碼轉成機器可執行或可連結的目的碼。本專案使用 `gcc`。 |
+| 連結器 | Linker | 將多個 `.o` 目的檔和外部函式庫合併成最終執行檔。 |
+| 標頭檔 | Header File | `.h` 檔，放結構定義、巨集與函式宣告，讓不同 `.c` 檔能共用介面。 |
+| 函式庫 | Library | 已寫好的功能集合。本專案連結 GNU Readline 來提供行編輯與歷史紀錄。 |
+| Makefile | Makefile | 描述如何編譯、連結、清除與執行專案的建置腳本。 |
+| 目標 | Target | Makefile 中可執行的工作名稱，例如 `all`、`clean`、`run`。 |
+| 目的檔 | Object File | `.o` 檔，由 `.c` 編譯而來，還不是完整程式，需要再連結。 |
+| 標準輸入 | Standard Input, stdin | 程式預設讀取資料的位置，檔案描述符是 `0`。 |
+| 標準輸出 | Standard Output, stdout | 程式預設輸出資料的位置，檔案描述符是 `1`。 |
+| 標準錯誤 | Standard Error, stderr | 程式輸出錯誤訊息的位置，檔案描述符是 `2`。 |
+| 結束碼 | Exit Status | 指令結束後回傳給父行程的狀態碼。通常 `0` 表示成功，非 `0` 表示錯誤。 |
 
 ---
 
@@ -103,6 +114,57 @@ flowchart TD
 
 ## 建置與執行
 
+這一段的目的，是讓使用者從一份乾淨的原始碼開始，確認環境、編譯出 `fwsh`、啟動 Shell，最後知道如何清掉建置產物。建置流程不是只為了「產生執行檔」，也用來驗證專案的檔案結構、標頭檔引用、外部函式庫連結是否正確。
+
+建置流程總覽：
+
+```mermaid
+flowchart TD
+    A["確認系統環境<br/>Linux / WSL / Ubuntu"] --> B["安裝建置工具<br/>build-essential"]
+    B --> C["安裝 Readline 開發套件<br/>libreadline-dev"]
+    C --> D["執行 make<br/>編譯 .c -> .o"]
+    D --> E["連結物件檔與函式庫<br/>產生 fwsh"]
+    E --> F["執行 ./fwsh<br/>進入互動式 Shell"]
+    F --> G["執行 make clean<br/>清除 obj/ 與 fwsh"]
+```
+
+建置相關關鍵字：
+
+| 關鍵字 | 英文 | 在本專案中的涵義 |
+|---|---|---|
+| 原始碼 | Source Code | `src/*.c` 和 `include/*.h`，是人可以閱讀與修改的 C 程式碼。 |
+| 建置 | Build | 從原始碼產生可執行檔的完整流程，包含編譯和連結。 |
+| 編譯 | Compile | `gcc` 將每個 `.c` 檔轉成 `.o` 目的檔。 |
+| 連結 | Link | 將所有 `.o` 和 Readline 函式庫合併成 `fwsh` 執行檔。 |
+| 依賴 | Dependency | 編譯或執行需要的外部套件，例如 `libreadline-dev`。 |
+| 開發套件 | Development Package | 提供 header 和 linker 需要的檔案。只有 runtime library 通常不夠編譯。 |
+| 目標檔 | Target File | Makefile 產生或操作的目標，例如 `fwsh`、`obj/*.o`。 |
+| 清除 | Clean | 移除建置產物，讓下一次編譯從乾淨狀態開始。 |
+
+建置前可以先確認目前位置：
+
+```bash
+pwd
+ls
+```
+
+預期目前目錄會看到：
+
+```text
+Makefile
+include/
+src/
+README_fwsh.md
+report_fwsh.md
+report_fwsh_api.md
+```
+
+若不在 `fwsh` 目錄，請先切到專案目錄：
+
+```bash
+cd /home/user/Linux-kernel/fwsh
+```
+
 ### 1. 安裝依賴
 
 Ubuntu / Debian 環境：
@@ -112,6 +174,15 @@ sudo apt update
 sudo apt install -y build-essential libreadline-dev
 ```
 
+這一步的目的：
+
+- `build-essential`：安裝 `gcc`、`make` 等 C 專案常用工具。
+- `libreadline-dev`：安裝 GNU Readline 的 header 和連結檔，讓 `#include <readline/readline.h>` 和 `-lreadline` 可以正常工作。
+
+為什麼需要 Readline：
+
+`fwsh` 是互動式 Shell，使用者會一直輸入指令。若只用一般 `fgets()`，需要自己處理上下鍵、游標移動、歷史紀錄和 Tab 補全。GNU Readline 已經提供這些功能，所以 `fwsh` 直接使用它。
+
 `libreadline-dev` 提供 `readline/readline.h`、`readline/history.h` 與連結時需要的開發檔。若只安裝到 runtime library，編譯仍會失敗，常見錯誤如下：
 
 ```text
@@ -120,11 +191,35 @@ fatal error: readline/history.h: No such file or directory
 
 這代表缺少開發套件，不是 `fwsh` 的 C 語法錯誤。安裝 `libreadline-dev` 後重新執行 `make` 即可。
 
+可用以下方式檢查工具是否存在：
+
+```bash
+gcc --version
+make --version
+ls /usr/include/readline/readline.h
+ls /usr/include/readline/history.h
+```
+
+若最後兩個 `ls` 找不到檔案，通常就是 `libreadline-dev` 尚未安裝。
+
 ### 2. 編譯
 
 ```bash
 make
 ```
+
+這一步的目的：
+
+把 `src/` 底下的 C 原始碼編譯成目的檔，再連結成 `fwsh` 執行檔。Makefile 會自動收集 `src/*.c`，所以新增新的 `.c` 檔時通常不需要手動改編譯指令。
+
+Makefile 的主要工作：
+
+| 階段 | Makefile 內容 | 說明 |
+|---|---|---|
+| 收集來源 | `SRCS := $(wildcard $(SRC_DIR)/*.c)` | 找出 `src/` 底下所有 `.c`。 |
+| 建立目的檔清單 | `OBJS := ...` | 將 `src/main.c` 對應成 `obj/main.o`。 |
+| 編譯 | `$(CC) $(CFLAGS) -MMD -MP -c $< -o $@` | 每個 `.c` 產生一個 `.o`。 |
+| 連結 | `$(CC) $^ -o $@ $(LDFLAGS)` | 將所有 `.o` 合成 `fwsh`。 |
 
 成功時會產生執行檔：
 
@@ -132,11 +227,37 @@ make
 fwsh
 ```
 
+成功時常見輸出：
+
+```text
+Compiling src/builtin.c...
+Compiling src/executor.c...
+Compiling src/main.c...
+Compiling src/parser.c...
+Compiling src/shell.c...
+Linking fwsh...
+✓ Build successful: fwsh
+```
+
+如果看到 warning，不一定代表建置失敗。要看最後是否有產生 `fwsh`，以及 `make` 是否以錯誤結束。若出現 `fatal error` 或 `make: ***`，通常代表編譯中斷，需要先修正。
+
+編譯後可以確認執行檔是否存在：
+
+```bash
+ls -l fwsh
+```
+
+若有看到類似 `-rwxr-xr-x` 的權限，表示它是可執行檔。
+
 ### 3. 啟動
 
 ```bash
 ./fwsh
 ```
+
+這一步的目的：
+
+啟動剛剛編譯出的 Shell，進入 `fwsh` 自己的 REPL。前面的 `./` 表示「執行目前目錄下的 `fwsh`」，避免系統去 `$PATH` 其他位置找同名程式。
 
 啟動後會看到提示字元：
 
@@ -144,7 +265,122 @@ fwsh
 [fwsh user@hostname ~/path]$
 ```
 
+提示字元欄位說明：
+
+| 欄位 | 說明 |
+|---|---|
+| `fwsh` | 表示目前在 fwsh 裡，不是在一般 bash。 |
+| `user` | 目前使用者名稱，來自環境變數 `USER`。 |
+| `hostname` | 主機名稱，來自 `gethostname()`。 |
+| `~/path` | 目前工作目錄，若位於家目錄下會用 `~` 縮寫。 |
+
+離開方式：
+
+```bash
+exit
+```
+
+或按下：
+
+```text
+Ctrl+D
+```
+
 ### 4. 清除建置產物
+
+```bash
+make clean
+```
+
+這一步的目的：
+
+移除編譯過程產生的 `obj/` 目錄與 `fwsh` 執行檔，讓專案回到未建置狀態。這在重新測試建置流程、確認 Makefile 是否完整、或避免提交執行檔時很有用。
+
+清除前後的差異：
+
+| 時機 | 可能存在的檔案 |
+|---|---|
+| `make` 後 | `fwsh`、`obj/*.o`、`obj/*.d` |
+| `make clean` 後 | 上述建置產物會被移除 |
+
+常用建置指令整理：
+
+| 指令 | 目的 | 什麼時候用 |
+|---|---|---|
+| `make` | 編譯專案。 | 第一次建置或修改程式後。 |
+| `make run` | 編譯後直接執行。 | 想快速進入 fwsh 測試。 |
+| `make clean` | 清除建置產物。 | 想重新乾淨建置，或避免留下執行檔。 |
+| `make debug` | 使用 ASan/UBSan 除錯建置。 | 懷疑有記憶體錯誤或未定義行為。 |
+| `make valgrind` | 用 Valgrind 檢查記憶體。 | 想追記憶體洩漏或未初始化讀取。 |
+| `make info` | 顯示 Makefile 偵測結果。 | 想確認 Makefile 找到哪些 `.c` 和 `.o`。 |
+
+---
+
+## DEMO 流程總覽
+
+這一段的目的，是用一套固定操作展示 `fwsh` 的主要功能。DEMO 不是隨便輸入幾個指令，而是依序驗證 Shell 的幾個核心能力：啟動、內建指令、外部指令、管線、重導向、韌體工具、背景執行、歷史紀錄和正常離開。
+
+建議 DEMO 前先完成：
+
+```bash
+make
+./fwsh
+```
+
+進入 `fwsh` 後，再依序輸入下列指令。
+
+DEMO 流程表：
+
+| 步驟 | 指令 | 目的 | 觀察重點 |
+|---|---|---|---|
+| 1 | `pwd` | 確認內建指令可執行。 | 不需要 fork 外部 `/bin/pwd`，直接由 `builtin_pwd()` 處理。 |
+| 2 | `printf "abc" \| wc -c > /tmp/fwsh_count.txt` | 展示外部指令、管線與輸出重導向。 | `printf` 的 stdout 進入 pipe，`wc -c` 的 stdout 寫入檔案。 |
+| 3 | `cat /tmp/fwsh_count.txt` | 檢查上一個重導向結果。 | 應看到 `3`。 |
+| 4 | `hexdump src/main.c 0x40` | 展示二進位檢視工具。 | 看 offset、hex bytes、ASCII 三欄。 |
+| 5 | `crc32 src/main.c` | 展示檔案完整性檢查。 | 看 CRC-32 是否印成 8 位十六進位。 |
+| 6 | `memmap` | 展示系統記憶體資訊讀取。 | 讀 `/proc/iomem`，在 WSL 可能看到遮蔽後的位址。 |
+| 7 | `sleep 10 &` | 展示背景執行。 | Shell 立即回到 prompt，並印出 background PID。 |
+| 8 | `history` | 展示歷史紀錄。 | 可看到前面輸入過的指令。 |
+| 9 | `exit` | 正常結束 fwsh。 | `g_shell.running` 變成 0，回到原本的系統 Shell。 |
+
+DEMO 關鍵字說明：
+
+| 關鍵字 | 英文 | DEMO 中的涵義 |
+|---|---|---|
+| 內建指令 | Built-in Command | `pwd`、`history`、`hexdump`、`crc32`、`memmap` 是 fwsh 自己實作的指令。 |
+| 外部指令 | External Command | `printf`、`wc`、`cat`、`sleep` 是系統上已有的程式，由 `execvp()` 執行。 |
+| 管線 | Pipeline | `|` 將前一個指令的 stdout 接到下一個指令的 stdin。 |
+| 重導向 | Redirection | `>` 將 stdout 寫入檔案，不直接印在終端機。 |
+| 背景執行 | Background Execution | `&` 讓 Shell 不等待該指令結束，直接回到 prompt。 |
+| PID | Process ID | 背景執行時印出的數字，用來識別該子行程。 |
+| EOF | End Of File | 管線寫端關閉後，讀端才知道資料結束。這也是 pipe fd 要正確關閉的原因。 |
+| `/proc/iomem` | Kernel Memory Map Interface | Linux kernel 提供的實體記憶體配置資訊。 |
+
+完整 DEMO 指令可直接照順序輸入：
+
+```bash
+pwd
+printf "abc" | wc -c > /tmp/fwsh_count.txt
+cat /tmp/fwsh_count.txt
+hexdump src/main.c 0x40
+crc32 src/main.c
+memmap
+sleep 10 &
+history
+exit
+```
+
+預期會觀察到：
+
+- `pwd` 印出目前所在目錄。
+- `/tmp/fwsh_count.txt` 內容是 `3`。
+- `hexdump` 顯示 `src/main.c` 前 `0x40` bytes。
+- `crc32` 顯示 `CRC32(...) = 0x????????` 格式。
+- `memmap` 顯示 `/proc/iomem` 內容。
+- `sleep 10 &` 會印出 `[background] <pid>`，且不會卡住 Shell。
+- `history` 會列出剛剛輸入的 DEMO 指令。
+
+DEMO 結束後可回到系統 Shell 清除建置產物：
 
 ```bash
 make clean

@@ -36,10 +36,17 @@ flowchart TD
 | 平台驅動 | Platform Driver | Linux 用來處理「不能自動被匯流排掃描出來」的硬體，例如 SoC 內建控制器。 |
 | 裝置樹 | Device Tree | 用資料描述硬體位置、相容字串與自訂屬性，讓 driver 不必把硬體資訊寫死在程式碼內。 |
 | 裝置樹二進位檔 | Device Tree Blob, DTB | DTS 編譯後的二進位格式，kernel 開機時會讀它來知道有哪些硬體。 |
+| 裝置樹覆蓋 | Device Tree Overlay | 只描述要新增或修改的 Device Tree 片段，再合併到 QEMU 原本的 base DTB。 |
 | 記憶體映射 I/O | Memory-Mapped I/O, MMIO | 把硬體暫存器放在記憶體位址空間，driver 用 `readl()` / `writel()` 存取。 |
 | 使用者空間介面 | sysfs | Linux 把 device 屬性暴露在 `/sys`，使用者可以用 `cat` / `echo` 操作。 |
 | 外部核心模組 | Out-of-tree Module | 不放在 kernel 原始碼樹內，而是用 kernel build system 另外編譯的 `.ko`。 |
 | 初始根檔案系統 | initramfs | kernel 開機早期載入的小型根檔案系統，本專案用它放 BusyBox、driver 與測試腳本。 |
+| Kernel 映像檔 | Kernel Image | 編譯後的 Linux kernel binary。QEMU 會用 `-kernel` 載入它。 |
+| QEMU virt machine | QEMU ARM64 `virt` machine | QEMU 提供的通用 ARM64 虛擬開發板，適合測試 kernel、DTB 與 driver bring-up。 |
+| BusyBox | BusyBox | 把常用 Linux 指令整合成一個小型 binary，常用在 initramfs。 |
+| 靜態連結 | Static Linking | binary 把需要的 runtime library 包進自己，不依賴 rootfs 內另外提供 `libc.so`。initramfs 通常適合用 static BusyBox。 |
+| 執行檔架構 | Binary Architecture | binary 是給哪種 CPU 執行，例如 x86-64 或 ARM64。ARM64 kernel 不能直接執行 x86-64 BusyBox。 |
+| 開機第一個程式 | `/init` | initramfs 中 kernel 啟動的第一個 user space 程式。本專案的 `/init` 會載入 driver 並跑測試。 |
 | 交叉編譯 | Cross Compilation | 在 x86-64 主機上編譯 ARM64 目標機器要執行的 kernel 或 module。 |
 | 相容字串 | Compatible String | Device Tree 用來配對 driver 的字串，例如 `myvendor,myled-v1`。 |
 | 位址宣告 | `reg` Property | Device Tree 中描述 MMIO base address 與 size 的屬性。Kernel 會把它轉成 driver 可取得的 resource。 |
@@ -98,6 +105,30 @@ bash scripts/00_install_deps.sh
 
 請在專案根目錄依序執行。
 
+### 流程總覽
+
+| 順序 | 指令 | 目的 | 為什麼需要 | 主要產物 / 判斷依據 |
+|---:|---|---|---|---|
+| 1 | `bash scripts/01_build_kernel.sh` | 建置 ARM64 kernel。 | QEMU 需要 kernel Image；driver 也需要對應 kernel tree 來編譯 `.ko`。 | `linux-6.6.30/arch/arm64/boot/Image` 存在。 |
+| 2 | `bash scripts/02_patch_dtb.sh` | 產生加入 myled 節點的 DTB。 | Kernel 要從 DTB 得知 `myled-controller@0d000000` 這個 platform device 存在。 | `dts/qemu-virt-myled.dtb` 存在，且可看到 `myled-controller@0d000000`。 |
+| 3 | `bash scripts/0A_fix_busybox_arch.sh` | 準備 ARM64 static BusyBox。 | initramfs 的 `/init` 需要 shell 與基本指令；CPU 架構不符會開機失敗。 | `tools/busybox-aarch64` 是 ARM64、statically linked。 |
+| 4 | `bash scripts/03_build_driver.sh` | 編譯 `myled_ctrl.ko`。 | QEMU 開機後 `/init` 會用 `insmod` 載入這個 driver。 | `rootfs/overlay/myled_ctrl.ko` 存在。 |
+| 5 | `bash scripts/04_build_rootfs.sh` | 打包 initramfs。 | QEMU 需要一個最小 rootfs 放 `/init`、BusyBox、driver 與測試腳本。 | `rootfs/initramfs.cpio.gz` 存在。 |
+| 6 | `bash scripts/05_run_qemu.sh` | 啟動 QEMU demo。 | 實際驗證 kernel、DTB、driver、rootfs、sysfs 是否能一起工作。 | QEMU 內 `/test_myled.sh` 顯示 `[PASS] myled sysfs test completed`。 |
+
+重點關係：
+
+```text
+01 產生 kernel Image
+02 產生 final DTB
+0A 產生 ARM64 BusyBox
+03 產生 myled_ctrl.ko
+04 把 BusyBox + /init + test + .ko 打包成 initramfs
+05 用 Image + DTB + initramfs 開 QEMU
+```
+
+`0A_fix_busybox_arch.sh` 的檔名前面是 `0A`，是因為它不是每次都一定要重做的主流程步驟，但它必須在 `04_build_rootfs.sh` 前完成。若 BusyBox 已經正確存在，可以不用重跑；若不存在或架構錯，就一定要跑。
+
 ### 1. 建置 ARM64 kernel
 
 ```bash
@@ -137,19 +168,103 @@ myled-controller@0d000000 {
 }
 ```
 
-### 3. 確認 BusyBox 是 ARM64
+### 3. 準備或確認 BusyBox 是 ARM64
 
 ```bash
 bash scripts/0A_fix_busybox_arch.sh
 ```
 
-ARM64 kernel 不能執行 x86-64 BusyBox。這一步會準備或修正本專案需要的 ARM64 BusyBox。
+這一步會交叉編譯出 ARM64 static BusyBox，放到：
+
+```text
+tools/busybox-aarch64
+```
+
+#### 0A 什麼時候要跑
+
+必須跑的情況：
+
+- 第一次在這台環境建置專案。
+- `tools/busybox-aarch64` 不存在。
+- `tools/busybox-aarch64` 不是可執行檔。
+- `file tools/busybox-aarch64` 沒有顯示 `ARM aarch64`、`ARM64` 或 `aarch64`。
+- `file tools/busybox-aarch64` 沒有顯示 `statically linked`。
+- `scripts/04_build_rootfs.sh` 顯示 `ARM64 BusyBox not found`。
+- `scripts/04_build_rootfs.sh` 顯示 `BusyBox is not an ARM64 binary`。
+- QEMU 開機時 `/init` 無法執行，或出現 `exec format` 類型錯誤。
+
+可以不用跑的情況：
+
+- `tools/busybox-aarch64` 已存在。
+- `file tools/busybox-aarch64` 顯示它是 ARM64/aarch64 binary。
+- 它是 static binary。
+- 你只是改 driver、DTS 或測試腳本，沒有更換 BusyBox。
+
+#### 判斷指令
+
+在專案根目錄執行：
+
+```bash
+test -x tools/busybox-aarch64 && file tools/busybox-aarch64
+```
+
+合理結果應包含類似字樣：
+
+```text
+ELF 64-bit LSB executable, ARM aarch64, statically linked
+```
+
+判斷重點：
+
+- `ARM aarch64` / `ARM64` / `aarch64`：代表 CPU 架構對。
+- `statically linked`：代表它不需要 initramfs 內另外提供動態函式庫。
+- 如果看到 `x86-64`：代表這個 BusyBox 是給主機跑的，不是給 QEMU ARM64 跑的。
+- 如果不是 static：initramfs 可能缺動態 linker 或 `libc.so`，開機後會找不到執行所需檔案。
+
+#### 跑完 0A 後要重做哪些步驟
+
+如果你是在 `04_build_rootfs.sh` 之前發現 BusyBox 不對：
+
+```bash
+bash scripts/0A_fix_busybox_arch.sh
+bash scripts/04_build_rootfs.sh
+bash scripts/05_run_qemu.sh
+```
+
+如果你已經打包過 rootfs，後來才發現 BusyBox 架構不對，要重新打包 rootfs：
+
+```bash
+bash scripts/0A_fix_busybox_arch.sh
+bash scripts/04_build_rootfs.sh
+bash scripts/05_run_qemu.sh
+```
+
+如果你同時也重編 driver，順序建議是：
+
+```bash
+bash scripts/0A_fix_busybox_arch.sh
+bash scripts/03_build_driver.sh
+bash scripts/04_build_rootfs.sh
+bash scripts/05_run_qemu.sh
+```
+
+原因很簡單：`04_build_rootfs.sh` 會把當下的 BusyBox 和 `rootfs/overlay/myled_ctrl.ko` 打包進 `rootfs/initramfs.cpio.gz`。所以 BusyBox 或 `.ko` 有變，就要重跑 `04_build_rootfs.sh`。
 
 ### 4. 編譯 driver
 
 ```bash
 bash scripts/03_build_driver.sh
 ```
+
+目的：
+
+- 使用 `linux-6.6.30` 的 kernel build tree 編譯外部核心模組。
+- 產生 ARM64 kernel 可載入的 `myled_ctrl.ko`。
+
+原因：
+
+- `.ko` 必須和目標 kernel 的 build 設定相容。
+- 不能拿主機 x86-64 kernel headers 來編 ARM64 QEMU 要載入的 module。
 
 產物會放入：
 
@@ -163,6 +278,17 @@ rootfs/overlay/myled_ctrl.ko
 bash scripts/04_build_rootfs.sh
 ```
 
+目的：
+
+- 建立 QEMU 開機後使用的最小 rootfs。
+- 把 ARM64 BusyBox、`/init`、`/test_myled.sh` 和 `myled_ctrl.ko` 打包在一起。
+
+原因：
+
+- Kernel 開機後需要 `/init` 當第一個 user space 程式。
+- `/init` 需要 BusyBox 提供 `sh`、`mount`、`insmod`、`dmesg` 等基本指令。
+- 測試腳本和 driver module 必須在 initramfs 內，QEMU 開機後才找得到。
+
 產物：
 
 ```text
@@ -175,11 +301,21 @@ rootfs/initramfs.cpio.gz
 - BusyBox 是否為 ARM64 binary。
 - `rootfs/overlay/myled_ctrl.ko` 是否已產生。
 
+如果這一步因 BusyBox 失敗，請回到第 3 步執行 `scripts/0A_fix_busybox_arch.sh`。如果這一步因 `.ko` 不存在失敗，請回到第 4 步執行 `scripts/03_build_driver.sh`。
+
 ### 6. 啟動 QEMU
 
 ```bash
 bash scripts/05_run_qemu.sh
 ```
+
+目的：
+
+- 把建置好的 kernel、DTB、initramfs 放進同一台 QEMU ARM64 虛擬機中執行。
+
+原因：
+
+- 只有實際開機後，才能確認 Device Tree 節點有被 kernel 解析、driver 有被載入、sysfs 節點有建立、測試腳本能讀寫屬性。
 
 QEMU 會載入：
 
@@ -191,6 +327,30 @@ QEMU 會載入：
 
 ```text
 Ctrl-A，接著按 X
+```
+
+## DEMO 流程
+
+DEMO 不是只看 QEMU 有沒有開起來，而是確認每一層都有接上。
+
+| 階段 | 發生的事 | 成功代表什麼 | 失敗時先看哪裡 |
+|---|---|---|---|
+| QEMU 載入 kernel | `05_run_qemu.sh` 用 `-kernel` 載入 ARM64 Image。 | Kernel 能開始 boot。 | `linux-6.6.30/arch/arm64/boot/Image` 是否存在。 |
+| QEMU 載入 DTB | `-dtb dts/qemu-virt-myled.dtb`。 | Kernel 看得到 `myled-controller@0d000000`。 | `scripts/02_patch_dtb.sh` 是否成功，DTB 是否含 myled 節點。 |
+| QEMU 載入 initramfs | `-initrd rootfs/initramfs.cpio.gz`。 | Kernel 找得到 `/init`。 | `scripts/04_build_rootfs.sh` 是否成功，BusyBox 架構是否 ARM64。 |
+| `/init` 掛載基本檔案系統 | 掛載 `/proc`、`/sys`、`/dev`。 | 後續可以讀 dmesg、sysfs、載入 module。 | QEMU console log。 |
+| `/init` 載入 driver | `insmod /myled_ctrl.ko`。 | `myled_ctrl` module 成功載入。 | `rootfs/overlay/myled_ctrl.ko` 是否存在，driver build 是否成功。 |
+| kernel 呼叫 `probe()` | Device Tree compatible 與 driver match。 | `myled_ctrl d000000.myled-controller: probe() succeeded`。 | `compatible` 是否一致，MMIO base/size 是否正確。 |
+| sysfs 建立 | Driver 建立 `myled/` attribute group。 | 可以看到 `enable`、`brightness`、`color`、`blink`、`status`、`info`。 | dmesg 中是否有 `sysfs group creation failed`。 |
+| 自測腳本讀寫 sysfs | `/test_myled.sh` 寫入後讀回。 | `[PASS] myled sysfs test completed`。 | 看是哪個 `[FAIL]`，再對應 driver/sysfs/DTB。 |
+
+DEMO 成功的核心訊號：
+
+```text
+[init] Module loaded OK
+myled_ctrl d000000.myled-controller: probe() succeeded
+[PASS] of_node = myled-controller@0d000000
+[PASS] myled sysfs test completed
 ```
 
 ## 預期執行結果

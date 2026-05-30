@@ -1,16 +1,16 @@
 # =============================================================================
-# Makefile — CPU Scheduling QEMU Demo
+# CPU Scheduling QEMU Demo
 #
-# Targets:
-#   make build       — compile scheduler.c on the host (sanity check)
-#   make demo-host   — run all algorithms locally on the host (no QEMU needed)
-#   make setup       — run 01_setup_env.sh
-#   make start       — run 02_start_vm.sh
-#   make demo        — run 03_demo.sh (requires running VM)
-#   make bench       — run 04_benchmark.sh (requires running VM)
-#   make clean       — run 05_cleanup.sh (stop VM, remove disk)
-#   make clean-full  — same, also remove base image
-#   make all         — setup → start → demo → bench (full pipeline)
+# 常用 target：
+#   make build       在 Host 編譯 scheduler.c，先確認 C 程式可建置
+#   make demo-host   在 Host 直接跑 demo workload，不需要 QEMU
+#   make setup       建立 QEMU disk 與 cloud-init seed
+#   make start       啟動 QEMU VM，並等待 scheduler 在 VM 內準備完成
+#   make demo        在 VM 內跑 6 個行程的 demo workload
+#   make bench       在 VM 內跑 12 個行程的 benchmark workload
+#   make clean       關閉 VM，移除本次產生的 VM 檔案
+#   make clean-full  額外刪除下載的 Ubuntu base image
+#   make all         依序執行 setup -> start -> demo -> bench
 # =============================================================================
 
 CC      = gcc
