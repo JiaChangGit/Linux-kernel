@@ -1,36 +1,36 @@
 
-════════════════════════════════════════════════════════════════════
+============================================================
   CPU Scheduling Algorithm Benchmark Results
   Workload: 12 processes | Platform: QEMU Ubuntu 24.04 x86_64
-════════════════════════════════════════════════════════════════════
+============================================================
 
   Columns:
-    Avg WT  — Average Waiting Time   (lower is better)
-    Avg TAT — Average Turnaround Time (lower is better)
-    Avg RT  — Average Response Time   (lower is better)
+    Avg WT  = Average Waiting Time   (lower is better)
+    Avg TAT = Average Turnaround Time (lower is better)
+    Avg RT  = Average Response Time   (lower is better)
 
-╔═══════════════════════════════╦══════════╦══════════╦══════════╗
-║ Algorithm                     ║  Avg WT  ║  Avg TAT ║  Avg RT  ║
-╠═══════════════════════════════╬══════════╬══════════╬══════════╣
-║ FCFS                          ║    21.83 ║    26.58 ║    21.83 ║
-║ SJF NonPreemptive             ║    14.58 ║    19.33 ║    14.58 ║
-║ SRTF Preemptive               ║    13.33 ║    18.08 ║    11.42 ║
-║ Priority NonPreemptive        ║    18.33 ║    23.08 ║    18.33 ║
-║ RoundRobin Q1                 ║    26.83 ║    31.58 ║     4.08 ║
-║ RoundRobin Q2                 ║    27.33 ║    32.08 ║     8.25 ║
-║ RoundRobin Q4                 ║    25.33 ║    30.08 ║    15.08 ║
-║ RoundRobin Q8                 ║    22.50 ║    27.25 ║    21.58 ║
-╚═══════════════════════════════╩══════════╩══════════╩══════════╝
++-------------------------------+----------+----------+----------+
+| Algorithm                     |   Avg WT |  Avg TAT |   Avg RT |
++-------------------------------+----------+----------+----------+
+| FCFS                          |    21.83 |    26.58 |    21.83 |
+| SJF NonPreemptive             |    14.58 |    19.33 |    14.58 |
+| SRTF Preemptive               |    13.33 |    18.08 |    11.42 |
+| Priority NonPreemptive        |    18.33 |    23.08 |    18.33 |
+| RoundRobin Q1                 |    26.83 |    31.58 |     4.08 |
+| RoundRobin Q2                 |    27.33 |    32.08 |     8.25 |
+| RoundRobin Q4                 |    25.33 |    30.08 |    15.08 |
+| RoundRobin Q8                 |    22.50 |    27.25 |    21.58 |
++-------------------------------+----------+----------+----------+
 
   Analysis:
-    Best Average Waiting Time    → SRTF Preemptive (13.3333)
-    Best Average Turnaround Time → SRTF Preemptive (18.0833)
-    Best Average Response Time   → RoundRobin Q1 (4.0833)
+    Best Average Waiting Time    = SRTF Preemptive (13.3333)
+    Best Average Turnaround Time = SRTF Preemptive (18.0833)
+    Best Average Response Time   = RoundRobin Q1 (4.0833)
 
   Round Robin Time Quantum Effect:
     As Q increases, RR converges toward FCFS behaviour.
-    Smaller Q gives lower response time but increases context-switch overhead.
-    Optimal Q depends on the average burst time of the workload.
+    Smaller Q usually improves first response time.
+    A very small Q can increase total waiting/turnaround time.
 
-════════════════════════════════════════════════════════════════════
+============================================================
 

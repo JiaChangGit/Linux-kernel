@@ -6,7 +6,7 @@ set -euo pipefail
 KERNEL_VERSION="6.6.30"
 KERNEL_DIR="linux-${KERNEL_VERSION}"
 KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v6.x/${KERNEL_DIR}.tar.xz"
-JOBS=$(nproc)
+JOBS=${JOBS:-$(nproc)}
 MAX_CLOCK_SKEW_RETRIES=2
 
 export ARCH=arm64
@@ -31,8 +31,8 @@ run_make_checked() {
         log_file=$(mktemp)
 
         set +e
-        make -j"${JOBS}" Image modules >"${log_file}" 2>&1
-        rc=$?
+        make -j"${JOBS}" Image modules 2>&1 | tee "${log_file}"
+        rc=${PIPESTATUS[0]}
         set -e
 
         if [ "${rc}" -ne 0 ]; then
@@ -59,6 +59,13 @@ run_make_checked() {
 }
 
 echo "=== [1/3] Download kernel ${KERNEL_VERSION} ==="
+case "${JOBS}" in
+    ''|*[!0-9]*|0)
+        echo "ERROR: JOBS 必須是正整數，例如：JOBS=4 bash scripts/01_build_kernel.sh"
+        exit 1
+        ;;
+esac
+
 if [ ! -d "${KERNEL_DIR}" ]; then
     wget -q --show-progress "${KERNEL_URL}"
     tar xf "${KERNEL_DIR}.tar.xz"
@@ -70,7 +77,9 @@ normalize_future_timestamps "."
 make defconfig
 
 echo "=== [3/3] Build (${JOBS} jobs) ==="
+echo "Build 輸出會即時顯示；若 VM 記憶體不足，請改用：JOBS=4 bash scripts/01_build_kernel.sh"
 run_make_checked
 
 echo ""
 echo "Kernel image: ${KERNEL_DIR}/arch/arm64/boot/Image"
+

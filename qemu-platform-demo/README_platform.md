@@ -143,6 +143,19 @@ linux-6.6.30/arch/arm64/boot/Image
 
 這個腳本會處理 WSL 或跨檔案系統常見的 future timestamp / clock skew 問題。若 make 偵測到檔案時間在未來，腳本會只修正未來時間的檔案並重新建置。
 
+在 VirtualBox 或 RAM 較小的 VM 裡，kernel build 可能跑很久。如果畫面仍有 `CC`、`LD`、`AR` 等輸出，代表還在編譯，不是卡住。若 VM 變得很慢或磁碟燈長時間大量閃爍，通常是平行編譯數太高造成 swap，可降低 jobs：
+
+```bash
+JOBS=4 bash scripts/01_build_kernel.sh
+```
+
+判斷方式：
+
+- 還有 `CC`、`LD`、`AR` 輸出：正在編譯，繼續等。
+- `top` 或 `htop` 看到 CPU 還在跑 `aarch64-linux-gnu-gcc`：正在編譯。
+- `free -h` 顯示 swap 大量使用：VM 記憶體不足，建議用 `JOBS=2` 或 `JOBS=4` 重跑。
+- 完全沒有輸出、CPU 幾乎 0%、磁碟也沒動超過 10 分鐘：才比較像真正卡住。
+
 ### 2. 產生含 myled 節點的 DTB
 
 ```bash
@@ -353,6 +366,18 @@ myled_ctrl d000000.myled-controller: probe() succeeded
 [PASS] myled sysfs test completed
 ```
 
+```bash
+# check 目前 MMIO 使用情況
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+cat /proc/iomem
+# 若看到：
+# 09000000-09000fff : 9000000.pl011
+# 那就不要用： reg = <0x0 0x09000000 0x0 0x1000>;
+# 否則兩個 driver 都會 claim 同一段 resource否則兩個 driver 都會 claim 同一段 resource
+```
+
 ## 預期執行結果
 
 開機後 `/init` 會自動載入 `myled_ctrl.ko`，再執行 `/test_myled.sh`。成功時會看到類似：
@@ -546,3 +571,4 @@ bash scripts/06_clean.sh --all
 - `devm_* resource management`：`devm_kzalloc()` 與 `devm_ioremap_resource()` 會把資源生命週期綁在 device 上，`probe()` 失敗時比較不容易漏掉清理。
 - `sysfs error propagation`：使用者寫入不合法資料時，例如 `brightness` 超過 255，driver 會回傳錯誤，而不是假裝成功。
 - `Simulated register bank`：目前 QEMU 沒有真正的 myled MMIO device model，所以 driver 用 `sim_regs[]` 模擬暫存器。這讓 platform driver、Device Tree、sysfs 與測試流程可以先跑通。
+

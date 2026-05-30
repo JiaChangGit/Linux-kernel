@@ -2,7 +2,7 @@
   PID  Arrival  Burst  Priority
   ---  -------  -----  --------
    1      0       8       3
-   2      1       4       1     ← highest priority
+   2      1       4       1     # priority 最高
    3      2       9       4
    4      3       5       2
    5      4       2       5
@@ -85,9 +85,9 @@ Gantt Chart:
 | P1  | P2  | P4  | P6  | P3  | P5  |
 0     8     12     17     18     27     29
 
-  Demonstrating how Time Quantum (Q) affects scheduling behaviour:
-  Small Q → lower response time, higher context-switch overhead
-  Large Q → approaches FCFS behaviour
+  Time Quantum (Q) 會影響 Round Robin 的排程行為：
+  - Q 較小：通常 response time 較低，但切換次數較多
+  - Q 較大：行為會逐漸接近 FCFS
 
 
 === RoundRobin_Q1 ===
