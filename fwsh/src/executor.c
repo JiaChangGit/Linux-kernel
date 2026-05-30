@@ -1,14 +1,15 @@
 /*
- * executor.c — Pipeline 執行引擎
+ * executor.c - Pipeline 執行引擎
  *
- * 這是 Shell 中技術含量最高的模組，涉及以下 POSIX 系統呼叫：
- *   fork()   — 建立子行程
- *   execvp() — 在子行程中載入新程式（取代目前行程映像）
- *   pipe()   — 建立單向資料管線（一對 fd：讀端 + 寫端）
- *   dup2()   — 複製 fd 到指定編號（用於把 pipe 接到 stdin/stdout）
- *   waitpid()— 等待特定子行程結束並取得結束碼
+ * 本模組把 parser 產生的 Pipeline 轉成真正的 process 與 fd 接線。
+ * 主要使用的 POSIX API：
+ *   fork()     建立子行程。
+ *   execvp()   在子行程中載入外部程式。
+ *   pipe()     建立單向資料通道。
+ *   dup2()     把 pipe 或檔案接到 stdin/stdout。
+ *   waitpid()  等待或回收子行程。
  *
- * Pipeline 執行流程圖（以 "A | B | C" 為例）：
+ * 以 "A | B | C" 為例：
  *
  *   pipe[0]        pipe[1]
  *   +-------+      +-------+
@@ -18,14 +19,15 @@
  *  [A stdout]      [B stdout]
  *  [B stdin ]      [C stdin ]
  *
- *  Parent 建立 pipe[0] 和 pipe[1]，然後 fork 三個子行程：
- *    A：stdout → pipe[0][1]（寫入 pipe[0]）
- *    B：stdin  ← pipe[0][0]（從 pipe[0] 讀取）
- *       stdout → pipe[1][1]（寫入 pipe[1]）
- *    C：stdin  ← pipe[1][0]（從 pipe[1] 讀取）
+ * Parent 建立 pipe[0] 和 pipe[1]，再 fork 三個 child：
+ *   A stdout -> pipe[0][1]
+ *   B stdin  <- pipe[0][0]
+ *   B stdout -> pipe[1][1]
+ *   C stdin  <- pipe[1][0]
  *
- *  關鍵：Parent 最後必須關閉所有 pipe fd，
- *        否則 B 和 C 的 stdin 永遠不會收到 EOF，會無限等待。
+ * 關鍵：
+ *   parent 和 child 都要關閉不需要的 pipe fd。
+ *   只要還有人持有寫端，讀端就可能收不到 EOF。
  */
 
 #include "executor.h"
@@ -40,23 +42,21 @@
 
 #include "builtin.h"
 
-/* ── 子行程中的 I/O 重導向設定 ─────────────────────── */
+/* ── 子行程中的 I/O 重導向 ─────────────────────────── */
 
 /*
- * setup_redirections - 在子行程中設定 I/O 重導向
+ * setup_redirections - 將 Cmd 的重導向設定套到目前 process
  *
- * 必須在 execvp() 之前、fork() 之後呼叫（僅在子行程中）。
+ * 呼叫時機：
+ *   fork() 之後、execvp() 之前，且只在 child 中呼叫。
  *
- * dup2(oldfd, newfd)：
- *   複製 oldfd 到 newfd，關閉原本的 newfd。
- *   效果：之後對 newfd 的讀寫，實際上操作的是 oldfd 指向的資源。
+ * dup2(oldfd, newfd) 會讓 newfd 指向 oldfd 的同一個 I/O 目標。
+ * 例：dup2(fd, STDIN_FILENO) 後，程式讀 stdin 就是在讀 fd。
  *
- * 例如 dup2(fd, STDIN_FILENO)：
- *   將 fd（一個 open() 開啟的檔案）複製到 fd=0（stdin），
- *   程式讀 stdin 時實際上就是在讀那個檔案。
+ * 這裡不處理 built-in 的 parent redirection；目前只服務外部指令路徑。
  */
 static int setup_redirections(Cmd* cmd) {
-  /* 輸入重導向：< file */
+  /* < file：把檔案接到 stdin。 */
   if (cmd->in_file) {
     int fd = open(cmd->in_file, O_RDONLY);
     if (fd < 0) {
@@ -64,10 +64,10 @@ static int setup_redirections(Cmd* cmd) {
       return -1;
     }
     dup2(fd, STDIN_FILENO);
-    close(fd); /* dup2 後原始 fd 不再需要，立即關閉以免 fd leak */
+    close(fd); /* dup2 後已可透過 stdin 使用，原 fd 立即關閉。 */
   }
 
-  /* 輸出重導向：> file 或 >> file */
+  /* > file 或 >> file：把 stdout 接到檔案。 */
   if (cmd->out_file) {
     int flags = O_WRONLY | O_CREAT | (cmd->out_append ? O_APPEND : O_TRUNC);
     int fd = open(cmd->out_file, flags, 0644);
@@ -82,34 +82,31 @@ static int setup_redirections(Cmd* cmd) {
   return 0;
 }
 
-/* ── 執行單一外部指令（子行程中呼叫）──────────────── */
+/* ── 外部指令執行路徑，只在 child 中呼叫 ───────────── */
 
 static void exec_external(Cmd* cmd) {
   if (setup_redirections(cmd) < 0) _exit(1);
 
   /*
-   * execvp(file, argv)：
-   *   - 在 PATH 中搜尋 file（有 'p' 的版本）
-   *   - argv 必須是 NULL 結尾的字串陣列
-   *   - 成功後此行程映像被完全替換，execvp 不會返回
-   *   - 失敗才返回（例如指令不存在）
+   * execvp(file, argv) 會依 PATH 搜尋 file。
+   * 成功後 child 的程式映像被替換，不會回到這份程式碼。
+   * 只有失敗時才會繼續往下執行。
    */
   execvp(cmd->argv[0], cmd->argv);
 
-  /* 只有 execvp 失敗才會執行到這裡 */
+  /* 只有 execvp() 失敗才會執行到這裡。 */
   fprintf(stderr, "fwsh: %s: %s\n", cmd->argv[0], strerror(errno));
-  _exit(127); /* 127 是 POSIX 慣例：command not found */
+  _exit(127); /* 127 是 shell 常見的 command not found 狀態碼。 */
 }
 
-/* ── 主執行函式 ──────────────────────────────────── */
+/* ── 主執行流程 ──────────────────────────────────── */
 
 int execute_pipeline(Pipeline* pipeline) {
   if (pipeline->ncmds == 0) return 0;
 
   /*
-   * 最常見的情況：單一指令，非背景執行。
-   * 先檢查是否為內建指令 → 直接在 Shell 行程執行，不 fork。
-   * 這樣 cd、exit 等指令才能修改 Shell 自身的狀態。
+   * 單一前景 built-in 直接在 parent Shell 執行。
+   * cd、exit 需要修改 Shell 本身狀態，不能只在 child 中執行。
    */
   if (pipeline->ncmds == 1 && !pipeline->background) {
     Cmd* cmd = &pipeline->cmds[0];
@@ -118,24 +115,24 @@ int execute_pipeline(Pipeline* pipeline) {
   }
 
   /*
-   * 多段 Pipeline 或背景執行：需要 fork。
+   * 外部指令、pipeline、背景執行都走 fork path。
    *
-   * 建立 (ncmds - 1) 個管線。
-   * pipes[i][0] = pipe[i] 讀端
-   * pipes[i][1] = pipe[i] 寫端
-   * cmd[i] 的 stdout → pipes[i][1]
-   * cmd[i+1] 的 stdin ← pipes[i][0]
+   * 對 n 段 Cmd，需要 n-1 條 pipe：
+   *   pipes[i][0] 是讀端。
+   *   pipes[i][1] 是寫端。
+   *   cmd[i] stdout 接 pipes[i][1]。
+   *   cmd[i+1] stdin 接 pipes[i][0]。
    */
   int npipes = pipeline->ncmds - 1;
   int pipes[MAX_PIPES][2];
   pid_t pids[MAX_PIPES];
   int nforked = 0;
 
-  /* 預先建立所有管線 */
+  /* 先建立所有 pipe，後續 child 才能依序接線。 */
   for (int i = 0; i < npipes; i++) {
     if (pipe(pipes[i]) < 0) {
       perror("fwsh: pipe");
-      /* 清理已建立的管線 */
+      /* pipe 建立到一半失敗時，只關閉已成功建立的 fd。 */
       for (int j = 0; j < i; j++) {
         close(pipes[j][0]);
         close(pipes[j][1]);
@@ -144,7 +141,7 @@ int execute_pipeline(Pipeline* pipeline) {
     }
   }
 
-  /* 對每段 Cmd fork 一個子行程 */
+  /* 每一段非空 Cmd 都對應一個 child process。 */
   for (int i = 0; i < pipeline->ncmds; i++) {
     Cmd* cmd = &pipeline->cmds[i];
     if (cmd->argc == 0) continue;
@@ -158,67 +155,62 @@ int execute_pipeline(Pipeline* pipeline) {
 
     if (pids[nforked] == 0) {
       /*
-       * ═══ 子行程 ═══
+       * child 接線規則：
+       *   - 不是第一段：stdin 來自前一條 pipe 的讀端。
+       *   - 不是最後段：stdout 接到目前 pipe 的寫端。
        *
-       * 第 i 段 Cmd 的 I/O 接線：
-       *   - 若 i > 0：stdin ← pipes[i-1][0]（從前一段讀）
-       *   - 若 i < npipes：stdout → pipes[i][1]（寫到下一段）
-       *
-       * 接好後，關閉子行程中所有 pipe fd（非常重要！）
-       * 若不關閉，即使父行程關閉了，寫端仍被子行程持有，
-       * 導致讀端永遠收不到 EOF。
+       * 接好後必須關閉所有 pipe fd。
+       * 否則讀端可能因為還有寫端被持有而等不到 EOF。
        */
 
-      /* 接管線輸入（非第一段） */
+      /* 非第一段：stdin 讀前一段輸出的資料。 */
       if (i > 0) dup2(pipes[i - 1][0], STDIN_FILENO);
 
-      /* 接管線輸出（非最後一段） */
+      /* 非最後段：stdout 寫給下一段。 */
       if (i < npipes) dup2(pipes[i][1], STDOUT_FILENO);
 
-      /* 關閉子行程中的所有 pipe fd */
+      /* child 已完成 dup2，原始 pipe fd 不再需要。 */
       for (int j = 0; j < npipes; j++) {
         close(pipes[j][0]);
         close(pipes[j][1]);
       }
 
       /*
-       * 管線中間段的內建指令（如 echo | grep）：
-       * 雖然是內建，但在管線中必須 fork，所以這裡
-       * 執行完後用 _exit() 結束子行程。
+       * built-in 若出現在 pipeline 或 background 中，也在 child 執行。
+       * 執行後用 _exit() 結束，避免 child 回到 parent 的控制流程。
        */
       if (is_builtin(cmd->argv[0])) _exit(exec_builtin(cmd));
 
       exec_external(cmd);
-      _exit(127); /* 不會執行到這裡 */
+      _exit(127); /* 正常不會走到這裡，保留作為防禦。 */
     }
 
-    /* 父行程繼續 fork 下一段 */
+    /* parent 記錄 child pid 後，繼續建立下一段 Cmd。 */
     nforked++;
   }
 
   /*
-   * ═══ 父行程 ═══
-   * 關閉所有 pipe fd。
-   * 若不關閉，子行程的讀端永遠不會收到 EOF（因為父行程持有寫端）。
+   * parent 不讀寫 pipeline，只負責管理 child。
+   * fork 完後關閉全部 pipe fd，避免影響 EOF。
    */
   for (int i = 0; i < npipes; i++) {
     close(pipes[i][0]);
     close(pipes[i][1]);
   }
 
-  /* 等待前景子行程結束 */
+  /* 前景執行要等 child 結束；背景執行直接回到 prompt。 */
   int last_status = 0;
 
   if (!pipeline->background) {
     for (int i = 0; i < nforked; i++) {
       int status;
       waitpid(pids[i], &status, 0);
-      /* 只記錄最後一段的結束碼（符合 POSIX Pipeline 語義） */
+      /* Shell 慣例：pipeline 狀態以最後一段命令為主。 */
       if (i == nforked - 1)
         last_status = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     }
   } else {
-    /* 背景執行：不等待，只印出 PID 供使用者追蹤 */
+    /* 背景執行不等待，讓使用者可繼續輸入下一個命令。 */
     printf("[background]");
     for (int i = 0; i < nforked; i++) printf(" %d", pids[i]);
     printf("\n");

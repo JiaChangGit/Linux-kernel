@@ -1,10 +1,13 @@
 /*
- * mq_demo.c  —  Message Queue step-by-step demonstration
+ * mq_demo.c - Message Queue 操作示範
  *
- * Opens /dev/mq_ipc, enqueues N messages, dequeues them, prints timings.
- * Run via scripts/02_demo.sh  (modules must be loaded first).
+ * 流程：
+ *   1. 開啟 /dev/mq_ipc。
+ *   2. 寫入少量固定大小訊息。
+ *   3. 讀回同樣數量的訊息並列印耗時。
+ *   4. 顯示 /proc/mq_stats，確認 kernel 端統計。
  *
- * Build:  see user/Makefile
+ * 執行前需先載入 mq_module.ko，可用 scripts/02_demo.sh 一起操作。
  */
 #include <stdio.h>
 #include <string.h>

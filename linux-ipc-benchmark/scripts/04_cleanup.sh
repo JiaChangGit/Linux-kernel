@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/04_cleanup.sh  —  unload modules, remove build artifacts
+# scripts/04_cleanup.sh - 卸載 kernel modules 並清理建置產物。
 set -euo pipefail
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -16,7 +16,7 @@ echo "  linux-ipc-benchmark  —  Cleanup"
 echo "================================================================"
 echo ""
 
-# ── 1. Unload modules ──────────────────────────────────────────────
+# ── 1. 卸載 modules：先卸載 SHM，再卸載 MQ ─────────────────────
 echo "[1/3]  Unloading kernel modules…"
 if lsmod | grep -q shm_module; then
     rmmod shm_module && ok "shm_module removed"
@@ -29,13 +29,13 @@ else
     warn "mq_module not loaded — skipping"
 fi
 
-# ── 2. Clean build artifacts ───────────────────────────────────────
+# ── 2. 清理建置產物：呼叫 top-level Makefile 的 clean 目標 ──────
 echo ""
 echo "[2/3]  Removing build artifacts…"
 make -C "${PROJECT_DIR}" clean 2>&1 | grep -v "^make" | head -20 || true
 ok "Build artifacts removed"
 
-# ── 3. Verify ──────────────────────────────────────────────────────
+# ── 3. 驗證清理結果：module、/dev、/proc 都應該不存在 ──────────
 echo ""
 echo "[3/3]  Verification…"
 PASS=1

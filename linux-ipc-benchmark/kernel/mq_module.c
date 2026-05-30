@@ -1,19 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * mq_module.c  —  Message Queue IPC kernel module
+ * mq_module.c - 訊息佇列 IPC kernel module
  *
- * Mechanism : Linux kfifo (kernel FIFO ring-buffer) + wait-queue blocking
- * Device    : /dev/mq_ipc   (character device)
- * Stats     : /proc/mq_stats
+ * 機制：Linux kfifo（核心端 FIFO ring buffer）+ wait queue 阻塞等待。
+ * 裝置：/dev/mq_ipc，使用 character device 介面提供 read/write。
+ * 觀測：/proc/mq_stats，輸出 enqueue/dequeue 次數與 FIFO 使用量。
  *
- * Data-copy path (the key educational point):
- *   write()  →  copy_from_user()  →  kfifo   (1st copy: user→kernel)
- *   read()   →  kfifo             →  copy_to_user()  (2nd copy: kernel→user)
+ * 資料路徑：
+ *   write() -> copy_from_user() -> kfifo
+ *              第一次複製：user buffer 到 kernel buffer。
+ *   read()  -> kfifo -> copy_to_user()
+ *              第二次複製：kernel buffer 到 user buffer。
  *
- * Every message crosses the user/kernel boundary TWICE.
- * That cost is what shared-memory mmap eliminates entirely.
+ * 重點：每筆訊息都會跨越 user/kernel boundary 兩次。
+ * 這正是後續 mmap shared memory 路徑想要避開的成本。
  *
- * Tested on Ubuntu 24.04 / Linux 6.8  (kernel >= 6.4 API)
+ * 測試環境：Ubuntu 24.04 / Linux 6.8，使用 kernel >= 6.4 的 API 寫法。
  */
 
 #include <linux/module.h>
@@ -34,36 +36,41 @@ MODULE_AUTHOR("JIA");
 MODULE_DESCRIPTION("IPC demo: Message Queue via kfifo");
 MODULE_VERSION("1.0");
 
-/* ───────────────────────── tunables ────────────────────────────────── */
+/* ───────────────────────── 可調整參數 ─────────────────────────────── */
 #define MQ_DEVICE    "mq_ipc"
-#define MSG_SIZE     64          /* fixed message size in bytes            */
-#define QUEUE_DEPTH  512         /* slots; FIFO_SIZE must be power-of-two */
-#define FIFO_SIZE    (MSG_SIZE * QUEUE_DEPTH)   /* = 32 768 bytes          */
+#define MSG_SIZE     64          /* 每筆訊息固定 64 bytes。 */
+#define QUEUE_DEPTH  512         /* FIFO slot 數量；總容量需適合 kfifo 使用。 */
+#define FIFO_SIZE    (MSG_SIZE * QUEUE_DEPTH)   /* FIFO 總容量：32768 bytes。 */
 
-/* ───────────────────────── kfifo + locking ─────────────────────────── */
+/* ───────────────────────── FIFO 與同步物件 ─────────────────────────── */
 static DEFINE_KFIFO(g_fifo, char, FIFO_SIZE);
 static DEFINE_MUTEX(g_lock);
-static DECLARE_WAIT_QUEUE_HEAD(g_rd_wq);   /* consumer blocks here */
-static DECLARE_WAIT_QUEUE_HEAD(g_wr_wq);   /* producer blocks here */
+static DECLARE_WAIT_QUEUE_HEAD(g_rd_wq);   /* FIFO 沒資料時，consumer 在這裡睡眠。 */
+static DECLARE_WAIT_QUEUE_HEAD(g_wr_wq);   /* FIFO 沒空間時，producer 在這裡睡眠。 */
 
-/* ───────────────────────── statistics ──────────────────────────────── */
-static atomic64_t st_enq;          /* total enqueued messages              */
-static atomic64_t st_deq;          /* total dequeued messages              */
-static atomic64_t st_lat_ns_total; /* cumulative enq→deq latency (ns)     */
-static ktime_t    st_last_enq_ts;  /* ktime of most-recent enqueue         */
+/* ───────────────────────── 統計資料 ───────────────────────────────── */
+static atomic64_t st_enq;          /* 已寫入 FIFO 的訊息總數。 */
+static atomic64_t st_deq;          /* 已從 FIFO 讀出的訊息總數。 */
+static atomic64_t st_lat_ns_total; /* enqueue 到 dequeue 的累積延遲，單位 ns。 */
+static ktime_t    st_last_enq_ts;  /* 最近一次 enqueue 的時間戳。 */
 
-/* ───────────────────────── char-device ─────────────────────────────── */
+/* ───────────────────────── character device 註冊狀態 ──────────────── */
 static dev_t         g_devno;
 static struct cdev   g_cdev;
 static struct class *g_class;
 
-/* ─── file operations ────────────────────────────────────────────────── */
+/* ─── VFS file operations：把 /dev/mq_ipc 的操作接到本模組 ─────────── */
 static int mq_open   (struct inode *n, struct file *f) { return 0; }
 static int mq_release(struct inode *n, struct file *f) { return 0; }
 
 /*
- * mq_write  —  producer path
- * Blocks (TASK_INTERRUPTIBLE) when kfifo is full; wakes consumer.
+ * mq_write - producer 寫入路徑。
+ *
+ * 流程：
+ *   1. 先用 copy_from_user() 把 user buffer 複製到 kernel stack。
+ *   2. FIFO 滿時進入 wait queue，等 consumer 讀走資料。
+ *   3. FIFO 有空間後，用 kfifo_in() 寫入固定 64 bytes。
+ *   4. 喚醒可能正在等待資料的 consumer。
  */
 static ssize_t mq_write(struct file *f, const char __user *ubuf,
                          size_t len, loff_t *pos)
@@ -76,7 +83,7 @@ static ssize_t mq_write(struct file *f, const char __user *ubuf,
     if (copy_from_user(kb, ubuf, len))
         return -EFAULT;
 
-    /* sleep until there is room for exactly one message */
+    /* 等到 FIFO 至少有一筆訊息的空間，避免寫入半筆資料。 */
     ret = wait_event_interruptible(g_wr_wq,
                                    kfifo_avail(&g_fifo) >= MSG_SIZE);
     if (ret) return -EINTR;
@@ -94,8 +101,13 @@ static ssize_t mq_write(struct file *f, const char __user *ubuf,
 }
 
 /*
- * mq_read  —  consumer path
- * Blocks unless O_NONBLOCK; records per-message latency.
+ * mq_read - consumer 讀取路徑。
+ *
+ * 流程：
+ *   1. FIFO 沒資料時，blocking fd 會睡眠；non-blocking fd 回 -EAGAIN。
+ *   2. 用 kfifo_out() 取出固定 64 bytes。
+ *   3. 用 copy_to_user() 複製回 user buffer。
+ *   4. 更新統計並喚醒可能正在等待空間的 producer。
  */
 static ssize_t mq_read(struct file *f, char __user *ubuf,
                         size_t len, loff_t *pos)
@@ -144,7 +156,7 @@ static const struct file_operations g_fops = {
     .read    = mq_read,
 };
 
-/* ─── /proc/mq_stats ─────────────────────────────────────────────────── */
+/* ─── /proc/mq_stats：提供簡單文字統計，方便 cat/watch 觀察 ───────── */
 static int mq_stats_show(struct seq_file *m, void *v)
 {
     u64 enq = atomic64_read(&st_enq);
@@ -170,7 +182,7 @@ static const struct proc_ops g_proc_ops = {
     .proc_release = single_release,
 };
 
-/* ─── init / exit ────────────────────────────────────────────────────── */
+/* ─── module init / exit：註冊與釋放 /dev、/proc 資源 ──────────────── */
 static int __init mq_init(void)
 {
     int ret;
@@ -186,7 +198,7 @@ static int __init mq_init(void)
     ret = cdev_add(&g_cdev, g_devno, 1);
     if (ret) goto err_cdev;
 
-    /* Linux >= 6.4: class_create() takes only the name */
+    /* Linux >= 6.4：class_create() 只需要傳入 class 名稱。 */
     g_class = class_create(MQ_DEVICE "_class");
     if (IS_ERR(g_class)) { ret = PTR_ERR(g_class); goto err_class; }
 

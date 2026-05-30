@@ -1,20 +1,20 @@
-# Out-of-tree kernel module Makefile
-# Usage: make KDIR=<kernel-source> ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+# Out-of-tree module build。
+# 範例：make KDIR=<kernel-source> ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
 
 DRIVER_NAME := myled_ctrl
 obj-m       := $(DRIVER_NAME).o
 
-# ── Kernel source directory ─────────────────────────────────────────
+# Kernel source/build 目錄；scripts/03_build_driver.sh 會傳入專案內的 linux-6.6.30。
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
-# ── Cross-compilation defaults ──────────────────────────────────────
+# ARM64 cross-build 預設值；命令列可覆寫。
 ARCH          ?= arm64
 CROSS_COMPILE ?= aarch64-linux-gnu-
 
-# ── Build artefacts dir ─────────────────────────────────────────────
+# 保留 build/ 目錄給後續擴充；目前 Kbuild 產物仍放在 driver/。
 BUILD_DIR := $(PWD)/build
 
-.PHONY: all clean modules_install
+.PHONY: all clean install
 
 all:
 	@mkdir -p $(BUILD_DIR)
@@ -28,6 +28,6 @@ clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
 	rm -rf $(BUILD_DIR) Module.symvers modules.order
 
-# Copy .ko into rootfs overlay for packaging
+# 供 scripts/04_build_rootfs.sh 打包進 initramfs。
 install:
 	cp $(DRIVER_NAME).ko ../rootfs/overlay/

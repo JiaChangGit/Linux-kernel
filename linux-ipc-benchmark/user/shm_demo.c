@@ -1,10 +1,14 @@
 /*
- * shm_demo.c  —  Shared Memory (mmap zero-copy) demonstration
+ * shm_demo.c - Shared Memory mmap 操作示範
  *
- * Opens /dev/shm_ipc, mmaps the kernel ring-buffer, then writes and reads
- * directly from the mapped pages — no copy_from/to_user per message.
+ * 流程：
+ *   1. 開啟 /dev/shm_ipc。
+ *   2. mmap() kernel 端的 shared ring buffer。
+ *   3. producer 直接寫入 shm->data[head]。
+ *   4. consumer 直接讀取 shm->data[tail]。
  *
- * Run via scripts/02_demo.sh  (modules must be loaded first).
+ * 這條路徑每筆訊息不呼叫 read/write，也不經 copy_from_user/copy_to_user。
+ * 執行前需先載入 shm_module.ko，可用 scripts/02_demo.sh 一起操作。
  */
 #include <fcntl.h>
 #include <stdio.h>
@@ -45,7 +49,7 @@ int main(void) {
     return 1;
   }
 
-  /* reset ring (demo always starts fresh) */
+  /* demo 每次都從空 ring 開始，避免受到前一次測試殘留狀態影響。 */
   shm->head.value = 0;
   shm->tail.value = 0;
   printf("  mmap OK  →  userspace ptr %p  maps kernel ring-buffer\n",
@@ -56,7 +60,7 @@ int main(void) {
   printf("[Producer]  Write %d messages directly into shared pages\n\n",
          DEMO_N);
   for (i = 0; i < DEMO_N; i++) {
-    /* spin-wait if full (unlikely in demo) */
+    /* demo 訊息數很少，通常不會滿；保留 full 判斷讓 ring 邏輯完整。 */
     do {
       head = shm->head.value;
       next = (head + 1) % RING_CAPACITY;
@@ -65,7 +69,7 @@ int main(void) {
     t0 = now_us();
     snprintf(shm->data[head], MSG_SIZE, "SHM-MSG[%02d] slot=%-3u data=%08x", i,
              head, i * 0xDEAD);
-    __sync_synchronize(); /* wmb: data visible before head bump  */
+    __sync_synchronize(); /* write barrier：先讓資料可見，再更新 head。 */
     shm->head.value = next;
     t1 = now_us();
     printf("  prod[%02d]  slot[%03u]  %-30s  Δ=%.1f µs\n", i, head,
@@ -75,14 +79,14 @@ int main(void) {
   printf("\n[Consumer]  Read %d messages directly from shared pages\n\n",
          DEMO_N);
   for (i = 0; i < DEMO_N; i++) {
-    /* spin-wait if empty (unlikely in demo) */
+    /* 若 consumer 追上 producer，就等待 head 前進。 */
     do {
       tail = shm->tail.value;
     } while (tail == shm->head.value);
 
     t0 = now_us();
-    __sync_synchronize(); /* rmb: see head update before data    */
-    /* read in-place — the data IS already in our address space       */
+    __sync_synchronize(); /* read barrier：先看見 head 更新，再讀資料。 */
+    /* 資料已在本行程的位址空間內，這裡只是複製一份快照方便列印。 */
     char snapshot[MSG_SIZE];
     memcpy(snapshot, shm->data[tail], MSG_SIZE);
     shm->tail.value = (tail + 1) % RING_CAPACITY;

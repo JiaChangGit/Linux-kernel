@@ -10,6 +10,7 @@ static bool ftl_request_range_is_valid(const ftl_context_t *ftl,
 {
     uint64_t last_lpn_exclusive;
 
+    /* 長度為 0 的 request 視為 no-op，不會碰 mapping table。 */
     if (request->length == 0) {
         *start_lpn = 0;
         *end_lpn = 0;
@@ -17,6 +18,7 @@ static bool ftl_request_range_is_valid(const ftl_context_t *ftl,
     }
 
     last_lpn_exclusive = request->lba + (uint64_t)request->length;
+    /* 同時檢查加法 overflow 與 logical range，避免 L2P 越界。 */
     if (last_lpn_exclusive < request->lba ||
         request->lba >= ftl->config->logical_pages ||
         last_lpn_exclusive > ftl->config->logical_pages) {
@@ -47,7 +49,7 @@ static bool ftl_handle_write(ftl_context_t *ftl, const request_t *request)
         physical_page_address_t new_ppa;
         bool has_old = mapping_get_physical_page(ftl->mapping_table, lpn, &old_ppa);
 
-        // Run background GC before consuming the last migration pages in the active block.
+        /* 寫入前先做預防性 GC，避免長 request 吃掉 GC migration 需要的空間。 */
         if (gc_needed(ftl)) {
             (void)gc_run(ftl, false);
         }
@@ -69,6 +71,7 @@ static bool ftl_handle_write(ftl_context_t *ftl, const request_t *request)
             }
         }
 
+        /* 新 page program 成功後，舊 page 才能標成 invalid。 */
         nand_program_page(&ftl->nand, &new_ppa, lpn);
         ftl->current_time_us += ftl->config->program_latency_us;
 
@@ -92,6 +95,7 @@ static bool ftl_handle_write(ftl_context_t *ftl, const request_t *request)
         return true;
     }
 
+    /* Sequential 判斷採 request-level：本次起點等於上一筆結尾。 */
     sequential_request = ftl->has_last_write &&
                          request->lba == ftl->last_write_end_lpn;
 
@@ -115,6 +119,7 @@ int ftl_init(const ssd_config_t *config)
         return -1;
     }
 
+    /* L2P table 大小等於 logical_pages，每個 LPN 對應一筆 entry。 */
     g_ftl.mapping_table = calloc(config->logical_pages, sizeof(mapping_entry_t));
     if (!g_ftl.mapping_table) {
         nand_destroy(&g_ftl.nand);
@@ -139,6 +144,7 @@ int ftl_init(const ssd_config_t *config)
         return -1;
     }
 
+    /* 初始時所有 block 都可用，先放進 pool，再取一個當 current_write_block。 */
     for (uint32_t block = 0; block < config->total_blocks; block++) {
         if (!free_block_pool_push(&g_ftl.free_block_pool, block)) {
             ftl_destroy();

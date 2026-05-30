@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# scripts/03_benchmark.sh  —  run throughput benchmark and display results
+# scripts/03_benchmark.sh - 執行 throughput benchmark 並顯示摘要。
 #
-# Usage:
-#   sudo bash scripts/03_benchmark.sh            # default 200 000 messages
-#   sudo bash scripts/03_benchmark.sh 500000     # custom count
+# 用法：
+#   sudo bash scripts/03_benchmark.sh            # 使用預設 200000 筆訊息
+#   sudo bash scripts/03_benchmark.sh 500000     # 指定訊息數
 set -euo pipefail
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'
@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 COUNT=${1:-200000}
 
-# ── sanity ─────────────────────────────────────────────────────────
+# ── 前置檢查：確認權限、device 與 benchmark binary 都存在 ────────
 [[ $EUID -ne 0 ]] && { echo "Run as root"; exit 1; }
 for dev in /dev/mq_ipc /dev/shm_ipc; do
     [[ -c $dev ]] || { echo "Missing $dev — run 01_setup.sh first"; exit 1; }
@@ -42,7 +42,7 @@ echo -e "${CYAN}─────────────────────�
 echo "  Running benchmark…  (this takes ~10–30 seconds)"
 echo ""
 
-# Run and capture output
+# benchmark 本身會列印三條 IPC 路徑的測試結果。
 "$BIN" "$COUNT"
 
 echo ""

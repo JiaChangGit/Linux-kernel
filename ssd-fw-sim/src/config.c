@@ -15,6 +15,7 @@ static bool parse_u32(const char *value, uint32_t *parsed_out)
         return false;
     }
 
+    /* value 必須整段都是十進位數字；例如 "200us" 會被視為錯誤。 */
     parsed = strtoul(value, &end, 10);
     if (end == value || *end != '\0' || parsed > UINT32_MAX) {
         return false;
@@ -41,6 +42,7 @@ static void trim_line(char *line)
 {
     size_t len = strlen(line);
 
+    /* 先去掉尾端空白與換行，再把前導空白往左搬掉。 */
     while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r' || isspace((unsigned char)line[len - 1]))) {
         line[--len] = '\0';
     }
@@ -70,6 +72,7 @@ int ssd_config_load_file(const char *path, ssd_config_t *config)
 
         trim_line(line);
 
+        /* 空行與 # 開頭的註解行不影響設定。 */
         if (line[0] == '\0' || line[0] == '#') {
             continue;
         }
@@ -147,6 +150,7 @@ int ssd_config_validate(const ssd_config_t *config)
         return -1;
     }
 
+    /* GC 門檻至少要留 1 個 block，且不能大到沒有可用 block。 */
     if (config->gc_free_block_threshold == 0 ||
         config->gc_free_block_threshold >= config->total_blocks) {
         LOG_ERROR("gc_free_block_threshold (%u) must be between 1 and %u",
@@ -155,6 +159,7 @@ int ssd_config_validate(const ssd_config_t *config)
         return -1;
     }
 
+    /* 邏輯容量不可超過實體 page 數，否則 L2P 可能指到不存在的 NAND。 */
     if (config->logical_pages > physical_pages) {
         LOG_ERROR("logical_pages (%u) cannot exceed physical capacity (%" PRIu64 ")",
                   config->logical_pages,

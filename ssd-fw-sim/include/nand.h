@@ -5,23 +5,27 @@
 #include "common.h"
 #include "config.h"
 
+/* NAND page 的生命週期：FREE -> VALID -> INVALID -> FREE（block erase 後）。 */
 typedef enum {
     NAND_PAGE_FREE = 0,
     NAND_PAGE_VALID,
     NAND_PAGE_INVALID,
 } nand_page_state_t;
 
+/* 物理頁位址，由 block index 與 page index 組成。 */
 typedef struct {
     uint32_t block_index;
     uint32_t page_index;
 } physical_page_address_t;
 
+/* Page metadata；logical_page_number 可視為簡化版 OOB/spare area。 */
 typedef struct {
     nand_page_state_t state;
     uint32_t logical_page_number;
     bool has_logical_page;
 } nand_page_t;
 
+/* Block 內的 counter 要與 page state 同步，GC 會依這些欄位選 victim。 */
 typedef struct {
     nand_page_t *pages;
     uint32_t valid_page_count;
@@ -31,6 +35,7 @@ typedef struct {
     uint32_t write_pointer;
 } nand_block_t;
 
+/* NAND SSD 只保存物理結構；L2P mapping 屬於 FTL，不放在這裡。 */
 typedef struct {
     nand_block_t *blocks;
     uint32_t total_blocks;
@@ -40,6 +45,7 @@ typedef struct {
 
 int nand_init(nand_ssd_t *nand, const ssd_config_t *config);
 void nand_destroy(nand_ssd_t *nand);
+/* Allocate 只挑 PPA 並移動 write pointer；真正寫入由 nand_program_page() 完成。 */
 bool nand_allocate_page(nand_ssd_t *nand,
                         free_block_pool_t *free_pool,
                         uint32_t *current_write_block,

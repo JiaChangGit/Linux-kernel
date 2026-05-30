@@ -1,4 +1,4 @@
-# user/Makefile
+# user-space Makefile：建置兩個 demo 與一個 benchmark 工具。
 CC      = gcc
 CFLAGS  = -Wall -O2 -I.
 TARGETS = mq_demo shm_demo benchmark

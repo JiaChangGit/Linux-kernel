@@ -1,34 +1,33 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * shm_module.c  —  Shared Memory IPC kernel module
+ * shm_module.c - 共享記憶體 IPC kernel module
  *
- * Mechanism : vmalloc() ring-buffer exposed via mmap()
- * Device    : /dev/shm_ipc   (character device)
- * Stats     : /proc/shm_stats
+ * 機制：用 vmalloc() 建立核心端 ring buffer，再提供兩種存取方式。
+ * 裝置：/dev/shm_ipc，使用 character device 介面。
+ * 觀測：/proc/shm_stats，輸出 ring 使用量與 syscall path 統計。
  *
- * Two intentionally distinct data paths are provided:
+ * 本模組刻意保留兩條資料路徑，用來比較成本來源：
  *
- *  [syscall path]  write() / read()
- *    write(): copy_from_user → ring-buf   (1 copy, spinlock)
- *    read() : ring-buf → copy_to_user     (1 copy, spinlock)
- *    Same copy count as MQ — isolates queue-mechanism overhead.
+ *  [syscall path] write() / read()
+ *    write(): copy_from_user() -> ring buffer。
+ *    read() : ring buffer -> copy_to_user()。
+ *    這條路徑仍有 user/kernel 複製，方便和 MQ syscall path 對照。
  *
  *  [mmap / zero-copy path]
- *    mmap() maps the SAME physical pages into the calling process.
- *    Producer and consumer write/read directly — zero extra copies,
- *    zero syscalls per message.  Only a memory barrier per slot.
- *    This is the core performance advantage of shared memory.
+ *    mmap() 將同一份 backing pages 映射到 user space。
+ *    producer / consumer 直接讀寫 mapped ring，每筆訊息不再進 kernel。
+ *    正確性依賴 head/tail 協定與 memory barrier。
  *
- * Ring-buffer layout  (struct shm_region — mirrored in user/common.h)
- *   head : next write index  (producer owns this field)
- *   tail : next read  index  (consumer owns this field)
- *   Full : (head+1) % CAP == tail
- *   Empty: head == tail
+ * Ring buffer 規則：
+ *   head : 下一個寫入 slot，由 producer 更新。
+ *   tail : 下一個讀取 slot，由 consumer 更新。
+ *   Full : (head + 1) % RING_CAPACITY == tail。
+ *   Empty: head == tail。
  *
- * Tested on Ubuntu 24.04 / Linux 6.8
- *   class_create(name)         — single-arg form (kernel >= 6.4)
- *   vm_flags_set(vma, flags)   — new vma-flags API (kernel >= 6.3)
- *   vmalloc_to_pfn()           — page-by-page pfn walk for remap_pfn_range
+ * 測試環境：Ubuntu 24.04 / Linux 6.8。
+ *   class_create(name)       : kernel >= 6.4 的單參數寫法。
+ *   vm_flags_set(vma, flags) : kernel >= 6.3 的 VMA flags helper。
+ *   vmalloc_to_pfn()         : vmalloc page 需逐頁轉成 PFN 後映射。
  */
 
 #include <linux/module.h>
@@ -49,15 +48,16 @@ MODULE_AUTHOR("JIA");
 MODULE_DESCRIPTION("IPC demo: Shared Memory via vmalloc ring-buffer + mmap");
 MODULE_VERSION("1.0");
 
-/* ───────────────────── tunables (mirror in user/common.h) ──────────── */
+/* ───────────────────── 可調整參數，需與 user/common.h 同步 ───────── */
 #define SHM_DEVICE     "shm_ipc"
 #define MSG_SIZE       64
-#define RING_CAPACITY  512    /* slots; keep as power-of-two             */
+#define RING_CAPACITY  512    /* ring slot 數量；維持 2 的次方較好計算。 */
 
 /*
- * shm_region  —  the shared layout
- * Pad head/tail onto separate cache lines (64 B) so producer and consumer
- * don't cause false-sharing on the same cache line.
+ * shm_region - kernel 端共享區布局。
+ *
+ * head 與 tail 更新頻率高，分開放到不同 cache line 可降低 false sharing。
+ * 若調整欄位或 padding，user/common.h 的 shm_region_t 也必須同步檢查。
  */
 struct __attribute__((aligned(64))) shm_region {
 
@@ -73,28 +73,28 @@ struct __attribute__((aligned(64))) shm_region {
     char data[RING_CAPACITY][MSG_SIZE];
 };
 
-/* size to expose via mmap — must be page-aligned */
+/* mmap 暴露給 user 的大小必須 page-aligned。 */
 #define SHM_BUF_SIZE   PAGE_ALIGN(sizeof(struct shm_region))
 
-static struct shm_region *g_shm;     /* vmalloc'd, page-aligned           */
-static spinlock_t         g_spin;    /* guards syscall path               */
+static struct shm_region *g_shm;     /* vmalloc() 配置的共享 ring buffer。 */
+static spinlock_t         g_spin;    /* 保護 syscall path 的 head/tail/data。 */
 
-/* ───────────────────────── statistics ──────────────────────────────── */
+/* ───────────────────────── 統計資料 ───────────────────────────────── */
 static atomic64_t st_wr;
 static atomic64_t st_rd;
 static atomic64_t st_lat_ns_total;
 static ktime_t    st_last_wr_ts;
 
-/* ───────────────────────── char-device ─────────────────────────────── */
+/* ───────────────────────── character device 註冊狀態 ──────────────── */
 static dev_t         g_devno;
 static struct cdev   g_cdev;
 static struct class *g_class;
 
-/* ─── file operations ────────────────────────────────────────────────── */
+/* ─── VFS file operations：/dev/shm_ipc 的 read/write/mmap 入口 ────── */
 static int shm_open   (struct inode *n, struct file *f) { return 0; }
 static int shm_release(struct inode *n, struct file *f) { return 0; }
 
-/* syscall write — copy_from_user into ring slot (spinlock) */
+/* syscall write：把 user buffer 複製到 ring slot，成功後推進 head。 */
 static ssize_t shm_write(struct file *f, const char __user *ubuf,
                           size_t len, loff_t *pos)
 {
@@ -106,7 +106,7 @@ static ssize_t shm_write(struct file *f, const char __user *ubuf,
     spin_lock(&g_spin);
     head = g_shm->head;
     next = (head + 1) % RING_CAPACITY;
-    if (next == g_shm->tail) {           /* ring full  */
+    if (next == g_shm->tail) {           /* ring 滿了，讓 caller 稍後重試。 */
         spin_unlock(&g_spin);
         return -ENOSPC;
     }
@@ -115,7 +115,7 @@ static ssize_t shm_write(struct file *f, const char __user *ubuf,
         return -EFAULT;
     }
     ts = ktime_get();
-    smp_wmb();                           /* data before head update */
+    smp_wmb();                           /* 先讓資料可見，再更新 head。 */
     g_shm->head = next;
     spin_unlock(&g_spin);
 
@@ -124,7 +124,7 @@ static ssize_t shm_write(struct file *f, const char __user *ubuf,
     return (ssize_t)MSG_SIZE;
 }
 
-/* syscall read — ring slot into copy_to_user (spinlock) */
+/* syscall read：從 ring slot 取出資料，再複製回 user buffer。 */
 static ssize_t shm_read(struct file *f, char __user *ubuf,
                          size_t len, loff_t *pos)
 {
@@ -136,7 +136,7 @@ static ssize_t shm_read(struct file *f, char __user *ubuf,
     if (len < MSG_SIZE) return -EINVAL;
 
     spin_lock(&g_spin);
-    if (g_shm->head == g_shm->tail) {   /* ring empty */
+    if (g_shm->head == g_shm->tail) {   /* ring 空了，caller 可稍後重試。 */
         spin_unlock(&g_spin);
         return -EAGAIN;
     }
@@ -157,14 +157,14 @@ static ssize_t shm_read(struct file *f, char __user *ubuf,
 }
 
 /*
- * shm_mmap  —  zero-copy path
+ * shm_mmap - 建立 zero-copy 路徑。
  *
- * vmalloc pages are not physically contiguous, so we iterate page-by-page
- * with vmalloc_to_pfn() + remap_pfn_range().
+ * vmalloc() 只保證 kernel 虛擬位址連續，不保證實體頁連續。
+ * 因此這裡逐頁呼叫 vmalloc_to_pfn()，再用 remap_pfn_range()
+ * 將每個 page frame 映射到 user VMA。
  *
- * After this returns, userspace holds a virtual pointer to the same
- * physical frames as g_shm.  Producer and consumer can read/write
- * ring slots directly — no syscall, no copy per message.
+ * 成功後，user space 取得指向同一份 backing pages 的虛擬位址。
+ * 之後每筆訊息可直接讀寫 shared ring，不必再走 read/write syscall。
  */
 static int shm_mmap(struct file *f, struct vm_area_struct *vma)
 {
@@ -177,7 +177,7 @@ static int shm_mmap(struct file *f, struct vm_area_struct *vma)
     if (vm_sz > SHM_BUF_SIZE)
         return -EINVAL;
 
-    /* kernel >= 6.3: vm_flags_set() replaces direct vma->vm_flags |= */
+    /* kernel >= 6.3：使用 vm_flags_set()，不要直接改 vma->vm_flags。 */
     vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
 
     while (done < vm_sz) {
@@ -200,7 +200,7 @@ static const struct file_operations g_fops = {
     .mmap    = shm_mmap,
 };
 
-/* ─── /proc/shm_stats ────────────────────────────────────────────────── */
+/* ─── /proc/shm_stats：輸出 shared ring 狀態與 syscall path 統計 ───── */
 static int shm_stats_show(struct seq_file *m, void *v)
 {
     u64      wc   = atomic64_read(&st_wr);
@@ -228,7 +228,7 @@ static const struct proc_ops g_proc_ops = {
     .proc_release = single_release,
 };
 
-/* ─── init / exit ────────────────────────────────────────────────────── */
+/* ─── module init / exit：配置 shared ring，註冊與釋放 /dev、/proc ── */
 static int __init shm_init(void)
 {
     int ret;

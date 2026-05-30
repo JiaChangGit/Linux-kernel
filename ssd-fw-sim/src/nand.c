@@ -3,6 +3,7 @@
 
 static void nand_reset_block(nand_block_t *block, uint32_t pages_per_block)
 {
+    /* Erase 後整個 block 回到可寫入狀態，write pointer 也歸零。 */
     for (uint32_t page = 0; page < pages_per_block; page++) {
         block->pages[page].state = NAND_PAGE_FREE;
         block->pages[page].logical_page_number = 0;
@@ -82,6 +83,7 @@ bool nand_allocate_page(nand_ssd_t *nand,
 {
     nand_block_t *block = &nand->blocks[*current_write_block];
 
+    /* 目前 block 寫滿後，才從 free pool 切到下一個 block。 */
     if (block->write_pointer >= nand->pages_per_block) {
         if (!free_block_pool_pop(free_pool, current_write_block)) {
             return false;
@@ -106,6 +108,7 @@ void nand_program_page(nand_ssd_t *nand,
     nand_block_t *block = &nand->blocks[ppa->block_index];
     nand_page_t *page = &block->pages[ppa->page_index];
 
+    /* logical_page_number 模擬 OOB metadata，GC 搬移時會靠它更新 L2P。 */
     page->state = NAND_PAGE_VALID;
     page->logical_page_number = logical_page_number;
     page->has_logical_page = true;
@@ -119,6 +122,7 @@ void nand_invalidate_page(nand_ssd_t *nand,
     nand_block_t *block = &nand->blocks[ppa->block_index];
     nand_page_t *page = &block->pages[ppa->page_index];
 
+    /* 非 VALID 頁不重複 invalid，避免 counter 被扣錯。 */
     if (page->state != NAND_PAGE_VALID) {
         return;
     }

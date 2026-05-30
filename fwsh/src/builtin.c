@@ -1,19 +1,18 @@
 /*
- * builtin.c — 內建指令完整實作
+ * builtin.c - fwsh 內建指令
  *
- * 一般 Shell 工具：
+ * 一般 Shell 指令：
  *   cd, pwd, exit/quit, help, history, clear
  *
- * 韌體工程師專屬工具（這些是履歷亮點）：
- *   hexdump  - Hex + ASCII 雙欄顯示檔案內容（韌體映像除錯必備）
- *   crc32    - CRC-32 檢查碼計算（韌體完整性驗證）
- *   memmap   - 顯示 /proc/iomem 實體記憶體佈局（了解目標板記憶體配置）
+ * 底層檢查工具：
+ *   hexdump  以 Hex + ASCII 顯示檔案內容。
+ *   crc32    計算 CRC-32，檢查檔案內容是否改變。
+ *   memmap   讀取 /proc/iomem，顯示實體記憶體配置。
  *
- * 分派機制：
- *   使用「函式指標表」（dispatch table）設計。
- *   新增指令只需：① 實作函式 ② 在 builtins[] 陣列加一筆記錄。
- *   不需要修改 is_builtin() 或 exec_builtin() 的邏輯。
- *   這種設計在韌體的「命令表」（command table）驅動架構中也很常見。
+ * 指令分派方式：
+ *   builtins[] 是名稱到函式的對照表。
+ *   新增指令時，只要實作函式並在表中加一筆資料，
+ *   不需要改 is_builtin() 或 exec_builtin() 的搜尋邏輯。
  */
 
 #include "builtin.h"
@@ -29,7 +28,7 @@
 
 #include "shell.h"
 
-/* ── 前置宣告 ─────────────────────────────────────── */
+/* ── 內部函式前置宣告 ─────────────────────────────── */
 static int builtin_cd(Cmd* cmd);
 static int builtin_pwd(Cmd* cmd);
 static int builtin_exit(Cmd* cmd);
@@ -40,10 +39,10 @@ static int builtin_hexdump(Cmd* cmd);
 static int builtin_crc32(Cmd* cmd);
 static int builtin_memmap(Cmd* cmd);
 
-/* ── 分派表 ───────────────────────────────────────── */
+/* ── 內建指令分派表 ───────────────────────────────── */
 /*
- * 函式指標表：以結構陣列儲存「名稱 → 函式 → 說明」的對應關係。
- * 最後一筆 name == NULL 作為哨兵（sentinel），用於終止迴圈搜尋。
+ * 每筆資料保存：指令名稱、對應函式、help 顯示文字。
+ * 最後一筆 name == NULL 是哨兵值，用來結束搜尋迴圈。
  */
 typedef struct {
   const char* name;
@@ -52,7 +51,7 @@ typedef struct {
 } BuiltinEntry;
 
 static BuiltinEntry builtins[] = {
-    /* 一般指令 */
+    /* 一般 Shell 指令 */
     {"cd", builtin_cd,
      "cd <dir>              Change directory (支援 ~ 和 -)          "},
     {"pwd", builtin_pwd,
@@ -67,17 +66,17 @@ static BuiltinEntry builtins[] = {
      "history               Show command history                     "},
     {"clear", builtin_clear,
      "clear                 Clear terminal screen                    "},
-    /* 韌體工程師工具 */
+    /* 底層檢查工具 */
     {"hexdump", builtin_hexdump,
      "hexdump <file> [len]  Hex+ASCII dump (supports 0x prefix)     "},
     {"crc32", builtin_crc32,
      "crc32 <file>          Compute CRC-32 checksum (IEEE 802.3)     "},
     {"memmap", builtin_memmap,
      "memmap                Show /proc/iomem physical memory layout  "},
-    /* 哨兵 */
+    /* 哨兵：表示表格結尾。 */
     {NULL, NULL, NULL}};
 
-/* ── 公開介面 ─────────────────────────────────────── */
+/* ── 對外介面 ─────────────────────────────────────── */
 
 int is_builtin(const char* name) {
   for (int i = 0; builtins[i].name; i++)
@@ -89,24 +88,24 @@ int exec_builtin(Cmd* cmd) {
   for (int i = 0; builtins[i].name; i++)
     if (strcmp(cmd->argv[0], builtins[i].name) == 0)
       return builtins[i].func(cmd);
-  return -1; /* 不應執行到此 */
+  return -1; /* 呼叫前通常已用 is_builtin() 檢查，正常不會到這裡。 */
 }
 
 /* ═══════════════════════════════════════════════════
- * 一般 Shell 指令實作
+ * 一般 Shell 指令
  * ═══════════════════════════════════════════════════ */
 
 /*
- * cd - 切換工作目錄
+ * cd - 切換 Shell 目前工作目錄
  *
- * 支援特殊引數：
- *   cd         → 回到 HOME
- *   cd ~       → 回到 HOME
- *   cd -       → 切換到上一個目錄（OLDPWD），並印出新路徑
- *   cd <path>  → 切換到指定路徑
+ * 支援：
+ *   cd         回到 HOME
+ *   cd ~       回到 HOME
+ *   cd -       切到上一個目錄，使用 OLDPWD
+ *   cd <path>  切到指定路徑
  *
- * OLDPWD 環境變數讓 cd - 成為可能。
- * 每次 cd 成功後都要更新 OLDPWD。
+ * cd 必須在 parent Shell 行程中執行。
+ * 如果在 child 中 chdir()，Shell 本身的 cwd 不會改變。
  */
 static int builtin_cd(Cmd* cmd) {
   const char* dir;
@@ -123,16 +122,16 @@ static int builtin_cd(Cmd* cmd) {
       fprintf(stderr, "cd: OLDPWD not set (no previous directory)\n");
       return 1;
     }
-    printf("%s\n", dir); /* cd - 習慣上會印出新路徑 */
+    printf("%s\n", dir); /* cd - 依慣例會顯示切換後的路徑。 */
   } else {
     dir = cmd->argv[1];
   }
 
-  /* 先記錄目前目錄為 OLDPWD */
+  /* 切換前先保存目前目錄，讓下一次 cd - 可回來。 */
   char old[512];
   if (getcwd(old, sizeof(old))) setenv("OLDPWD", old, 1);
 
-  /* 實際切換 */
+  /* chdir() 會改變目前 process 的工作目錄。 */
   if (chdir(dir) != 0) {
     fprintf(stderr, "cd: %s: %s\n", dir, strerror(errno));
     return 1;
@@ -140,9 +139,9 @@ static int builtin_cd(Cmd* cmd) {
   return 0;
 }
 
-/* pwd - 印出工作目錄 */
+/* pwd - 顯示目前工作目錄。 */
 static int builtin_pwd(Cmd* cmd) {
-  (void)cmd; /* 不使用引數 */
+  (void)cmd; /* pwd 不需要讀取 argv。 */
   char cwd[512];
   if (getcwd(cwd, sizeof(cwd)))
     printf("%s\n", cwd);
@@ -152,10 +151,10 @@ static int builtin_pwd(Cmd* cmd) {
 }
 
 /*
- * exit - 結束 Shell
+ * exit - 結束 fwsh
  *
- * 設定 g_shell.running = 0 → shell_run() 的 while 迴圈結束 → main() 返回。
- * 可選引數為結束碼（預設 0）。
+ * 設定 g_shell.running = 0，shell_run() 下一輪檢查時會離開 REPL。
+ * 可選引數是結束碼；目前用 atoi() 做簡單轉換。
  */
 static int builtin_exit(Cmd* cmd) {
   int code = 0;
@@ -166,7 +165,7 @@ static int builtin_exit(Cmd* cmd) {
   return code;
 }
 
-/* help - 顯示所有指令說明 */
+/* help - 走訪 builtins[]，顯示所有內建指令。 */
 static int builtin_help(Cmd* cmd) {
   (void)cmd;
   printf(COLOR_GREEN "fwsh v%s — Firmware Mini Shell\n" COLOR_RESET,
@@ -184,7 +183,7 @@ static int builtin_help(Cmd* cmd) {
   return 0;
 }
 
-/* history - 顯示指令歷史 */
+/* history - 顯示 fwsh 自己保存的最近輸入命令。 */
 static int builtin_history(Cmd* cmd) {
   (void)cmd;
   if (g_shell.hist_count == 0) {
@@ -199,13 +198,12 @@ static int builtin_history(Cmd* cmd) {
   return 0;
 }
 
-/* clear - 清除終端機畫面 */
+/* clear - 用 ANSI escape code 清除終端機畫面。 */
 static int builtin_clear(Cmd* cmd) {
   (void)cmd;
   /*
-   * ANSI escape codes：
-   *   \033[2J  = 清除整個畫面
-   *   \033[H   = 游標移到左上角 (row 1, col 1)
+   * \033[2J  清除整個畫面。
+   * \033[H   將游標移到左上角。
    */
   printf("\033[2J\033[H");
   fflush(stdout);
@@ -213,26 +211,20 @@ static int builtin_clear(Cmd* cmd) {
 }
 
 /* ═══════════════════════════════════════════════════
- * 韌體工程師專屬工具實作
+ * 底層檢查工具
  * ═══════════════════════════════════════════════════ */
 
 /*
- * builtin_hexdump - Hex + ASCII 雙欄顯示
+ * builtin_hexdump - 以 Hex + ASCII 顯示檔案內容
  *
- * 用途：在不借助外部工具的情況下，快速檢視韌體映像檔、
- *       Flash 轉儲、暫存器 shadow 緩衝區等二進位資料。
+ * 用途：
+ *   快速檢查二進位檔案內容，例如韌體映像、Flash dump、
+ *   或其他不能直接用文字編輯器閱讀的資料。
  *
- * 顯示格式（每列 16 bytes）：
+ * 顯示格式：每列 16 bytes。
  *   Offset  | 左半部 8 bytes | 右半部 8 bytes | ASCII 表示
  *
- * 與 `hexdump -C` 的差異：
- *   - 這是「不需要安裝任何套件」的自包含版本
- *   - 支援以 0x 前置的十六進位 len 引數
- *   - 已整合彩色輸出
- *
- * 使用範例：
- *   hexdump /boot/vmlinuz 0x80   ← 顯示前 128 bytes
- *   hexdump /dev/mem 256         ← 顯示前 256 bytes
+ * len 使用 strtol(base=0)，所以可輸入 128、0x80 等格式。
  */
 static int builtin_hexdump(Cmd* cmd) {
   if (cmd->argc < 2) {
@@ -241,7 +233,7 @@ static int builtin_hexdump(Cmd* cmd) {
     return 1;
   }
 
-  /* strtol 的 base=0 讓它自動識別 0x（十六進位）和 0（八進位）前置 */
+  /* base=0 讓 strtol() 自動接受十進位、0x 十六進位與 0 開頭八進位。 */
   long max_bytes = 256;
   if (cmd->argc >= 3) {
     char* endptr;
@@ -253,7 +245,7 @@ static int builtin_hexdump(Cmd* cmd) {
   }
 
   FILE* fp =
-      fopen(cmd->argv[1], "rb"); /* "rb" = binary mode，避免 Windows 換行轉換 */
+      fopen(cmd->argv[1], "rb"); /* rb 表示以二進位模式讀取。 */
   if (!fp) {
     fprintf(stderr, "hexdump: %s: %s\n", cmd->argv[1], strerror(errno));
     return 1;
@@ -273,25 +265,25 @@ static int builtin_hexdump(Cmd* cmd) {
   size_t n;
 
   while (offset < max_bytes) {
-    /* 計算本列最多能讀幾 bytes */
+    /* 每列最多顯示 16 bytes；最後一列可能不足 16 bytes。 */
     size_t to_read =
         (size_t)((max_bytes - offset) < 16 ? (max_bytes - offset) : 16);
     n = fread(buf, 1, to_read, fp);
     if (n == 0) break;
 
-    /* 欄位 1：偏移量（8 位十六進位）*/
+    /* 欄位 1：目前列的檔案偏移量。 */
     printf("%08lX  ", offset);
 
-    /* 欄位 2：十六進位 bytes，分兩組各 8 bytes，中間加空格 */
+    /* 欄位 2：十六進位 byte，8 bytes 後多留一格方便閱讀。 */
     for (int i = 0; i < 16; i++) {
-      if (i == 8) printf(" "); /* 中間分隔空格，提升可讀性 */
+      if (i == 8) printf(" "); /* 左右各 8 bytes 分組。 */
       if (i < (int)n)
         printf("%02X ", buf[i]);
       else
-        printf("   "); /* 最後一列不足 16 bytes 時填充空格 */
+        printf("   "); /* 不足 16 bytes 時補空白，維持欄位對齊。 */
     }
 
-    /* 欄位 3：ASCII 表示（不可見字元以 '.' 代替） */
+    /* 欄位 3：可列印字元直接顯示，不可列印字元用 '.'。 */
     printf(" |");
     for (size_t i = 0; i < n; i++)
       printf("%c", (buf[i] >= 0x20 && buf[i] < 0x7F) ? (char)buf[i] : '.');
@@ -307,27 +299,23 @@ static int builtin_hexdump(Cmd* cmd) {
   return 0;
 }
 
-/* ── CRC-32 查找表（IEEE 802.3 多項式 0xEDB88320）──── */
+/* ── CRC-32 查找表，使用 IEEE 802.3 反射多項式 ─────── */
 
 /*
- * CRC-32 在韌體開發中的重要性：
- *   - Bootloader 在跳轉到 Application 前，用 CRC-32 驗證 Flash 內容
- *   - OTA 更新時驗證下載的韌體映像是否損壞
- *   - 通訊協定（UART、SPI frame）的資料完整性校驗
+ * CRC-32 常用來檢查資料是否被改動。
+ * 在韌體情境中，常見於映像檔驗證、OTA 更新檢查與通訊封包校驗。
  *
- * 演算法原理：
- *   使用「查找表法」（table-driven CRC）大幅提升速度。
- *   預先計算每個 byte 值（0~255）的 CRC 貢獻，存入 256 筆的查找表。
- *   實際計算時，對每個 byte 只需一次 XOR + 一次查表 + 一次右移。
+ * 這裡使用查找表法：
+ *   先預算 0~255 每個 byte 的 CRC 貢獻。
+ *   實際計算時，每個 byte 只需 XOR、查表與右移。
  */
 static uint32_t crc32_table[256];
 static int crc32_table_ready = 0;
 
 static void crc32_build_table(void) {
   /*
-   * IEEE 802.3 反射多項式（bit-reversed polynomial）：
-   *   原始多項式 0x04C11DB7 的反射形式為 0xEDB88320。
-   *   使用反射形式是因為它從 LSB 開始處理，實作更簡單。
+   * 0xEDB88320 是 IEEE 802.3 CRC-32 的反射多項式。
+   * 反射形式從最低位元開始處理，適合這個右移實作。
    */
   for (uint32_t byte = 0; byte < 256; byte++) {
     uint32_t crc = byte;
@@ -357,14 +345,12 @@ static int builtin_crc32(Cmd* cmd) {
   if (!crc32_table_ready) crc32_build_table();
 
   /*
-   * CRC-32 計算步驟：
-   *   1. 初始值設為 0xFFFFFFFF（全 1 的初始化向量）
-   *   2. 對每個輸入 byte 更新 CRC：
-   *      crc = table[(crc XOR byte) & 0xFF] XOR (crc >> 8)
-   *   3. 最終結果與 0xFFFFFFFF 做 XOR（位元反轉完成）
+   * 計算流程：
+   *   1. 初始值設為 0xFFFFFFFF。
+   *   2. 逐 byte 更新 CRC。
+   *   3. 最後再 XOR 0xFFFFFFFF 取得輸出值。
    *
-   * 為何初始化為 0xFFFFFFFF 又最終 XOR？
-   *   確保全 0 的輸入不會產生全 0 的 CRC（避免偽陰性）。
+   * 初始與結尾都使用 0xFFFFFFFF，是常見 CRC-32 參數設定。
    */
   uint32_t crc = 0xFFFFFFFFU;
   uint8_t chunk[4096];
@@ -378,7 +364,7 @@ static int builtin_crc32(Cmd* cmd) {
   }
   fclose(fp);
 
-  crc ^= 0xFFFFFFFFU; /* 最終位元反轉 */
+  crc ^= 0xFFFFFFFFU; /* 產生最終 CRC-32 值。 */
 
   printf(COLOR_YELLOW "CRC32" COLOR_RESET "(%s) = " COLOR_GREEN
                       "0x%08X" COLOR_RESET "  (%ld bytes, %ld KB)\n",
@@ -387,20 +373,13 @@ static int builtin_crc32(Cmd* cmd) {
 }
 
 /*
- * memmap - 顯示 /proc/iomem 實體記憶體佈局
+ * memmap - 顯示 Linux 實體記憶體配置
  *
- * /proc/iomem 記錄了系統的實體位址空間配置，
- * 對韌體工程師和 BSP（Board Support Package）工程師非常重要：
- *   - 確認 System RAM 起始位址和大小
- *   - 查看 Kernel 和 initrd 被載入到哪個實體位址
- *   - 確認 PCI / ACPI 設備的 MMIO 位址範圍
- *   - 在 Device Tree 或 Linker Script 設定時做交叉核對
+ * /proc/iomem 由 Linux kernel 提供，列出實體位址空間如何分配。
+ * 可用來觀察 System RAM、Kernel、initrd、ACPI、PCI 等區域。
  *
- * 彩色標示：
- *   黃色 = System RAM（最重要，可用記憶體）
- *   青色 = Kernel 相關區域
- *   洋紅 = ACPI / PCI 設備
- *   白色 = 其他
+ * 注意：
+ *   在 WSL、容器或虛擬化環境中，位址可能被遮蔽或簡化。
  */
 static int builtin_memmap(Cmd* cmd) {
   (void)cmd;
@@ -423,7 +402,7 @@ static int builtin_memmap(Cmd* cmd) {
 
   char line[256];
   while (fgets(line, sizeof(line), fp)) {
-    /* 根據關鍵字選擇顏色 */
+    /* 用關鍵字簡單分類，讓重要區域較容易掃讀。 */
     if (strstr(line, "System RAM"))
       printf(COLOR_YELLOW "%s" COLOR_RESET, line);
     else if (strstr(line, "Kernel") || strstr(line, "kernel") ||

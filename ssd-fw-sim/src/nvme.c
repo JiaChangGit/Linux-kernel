@@ -3,6 +3,7 @@
 static void nvme_request_from_submission(const nvme_submission_entry_t *submission,
                                          request_t *request)
 {
+    /* SQ entry 只保存協定層欄位；轉成 request_t 後才交給韌體處理。 */
     request->type = REQUEST_TYPE_WRITE;
     request->command_id = submission->command_id;
     request->queue_id = 1;
@@ -90,6 +91,7 @@ int nvme_submit_write(nvme_controller_t *controller,
         return -1;
     }
 
+    /* Host 只把 command 放進 SQ；真正執行要等 nvme_issue_pending()。 */
     entry = &controller->sq_entries[controller->sq_tail];
     entry->command_id = controller->next_command_id++;
     entry->slba = slba;
@@ -108,11 +110,13 @@ uint32_t nvme_issue_pending(nvme_controller_t *controller,
 {
     uint32_t issued = 0;
 
+    /* 只要 SQ 有命令且內部 RQ 還有空間，就持續 fetch。 */
     while (!nvme_sq_is_empty(controller) &&
            !request_queue_is_full(request_queue)) {
         const nvme_submission_entry_t *entry = &controller->sq_entries[controller->sq_head];
         request_t request;
 
+        /* 目前只支援 WRITE；未知 opcode 會被消耗但不送進 RQ。 */
         if (entry->opcode != NVME_OPCODE_WRITE) {
             controller->sq_head = (controller->sq_head + 1U) % controller->sq_capacity;
             controller->sq_count--;
@@ -144,6 +148,7 @@ bool nvme_post_completion(nvme_controller_t *controller,
         return false;
     }
 
+    /* Completion 保留 command_id，host 才能對回原本的 SQ command。 */
     entry = &controller->cq_entries[controller->cq_tail];
     entry->command_id = request->command_id;
     entry->sq_head = (uint16_t)controller->sq_head;
@@ -156,6 +161,7 @@ bool nvme_post_completion(nvme_controller_t *controller,
     controller->cq_count++;
     controller->completion_count++;
 
+    /* CQ 環形回繞時翻轉 phase，模擬 NVMe 判斷 entry 新舊的機制。 */
     if (controller->cq_tail == 0) {
         controller->cq_phase ^= 1U;
     }

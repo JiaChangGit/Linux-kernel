@@ -41,6 +41,7 @@ bool request_queue_enqueue(request_queue_t *queue, const request_t *request)
         return false;
     }
 
+    /* 環形佇列：寫入 tail 後往前推進，超過尾端就回到 0。 */
     queue->entries[queue->tail] = *request;
     queue->tail = (queue->tail + 1U) % queue->capacity;
     queue->size++;
@@ -53,6 +54,7 @@ bool request_queue_dequeue(request_queue_t *queue, request_t *request)
         return false;
     }
 
+    /* 取出 head 指向的 request，再釋放該 slot。 */
     *request = queue->entries[queue->head];
     queue->head = (queue->head + 1U) % queue->capacity;
     queue->size--;

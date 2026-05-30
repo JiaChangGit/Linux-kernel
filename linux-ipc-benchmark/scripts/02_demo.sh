@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/02_demo.sh  —  step-by-step IPC demonstration
+# scripts/02_demo.sh - 逐步展示 MQ 與 SHM mmap 的資料流。
 set -euo pipefail
 
 GREEN='\033[0;32m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -8,7 +8,7 @@ hdr() { echo -e "\n${BOLD}${CYAN}$*${NC}"; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-# ── sanity ─────────────────────────────────────────────────────────
+# ── 前置檢查：demo 需要 root 與已建立的 character devices ───────
 [[ $EUID -ne 0 ]] && { echo "Run as root"; exit 1; }
 for dev in /dev/mq_ipc /dev/shm_ipc; do
     [[ -c $dev ]] || { echo "Missing $dev — run 01_setup.sh first"; exit 1; }
@@ -24,7 +24,7 @@ echo "  you can inspect every enqueue / dequeue step and compare the"
 echo "  timing deltas side-by-side."
 echo ""
 
-# ── Part 1: Message Queue ──────────────────────────────────────────
+# ── Part 1：Message Queue，觀察 syscall 與 kfifo copy path ───────
 hdr "━━━━  Part 1 of 2  —  Message Queue  (/dev/mq_ipc)  ━━━━"
 cat <<'EXPLAIN'
 
@@ -49,7 +49,7 @@ read -rp "  Press Enter to run mq_demo…"
 echo ""
 "${PROJECT_DIR}/user/mq_demo"
 
-# ── Part 2: Shared Memory mmap ─────────────────────────────────────
+# ── Part 2：Shared Memory mmap，觀察直接讀寫 mapped pages ────────
 hdr "━━━━  Part 2 of 2  —  Shared Memory mmap  (/dev/shm_ipc)  ━━━━"
 cat <<'EXPLAIN'
 
@@ -79,7 +79,7 @@ read -rp "  Press Enter to run shm_demo…"
 echo ""
 "${PROJECT_DIR}/user/shm_demo"
 
-# ── Side-by-side proc stats ────────────────────────────────────────
+# ── 最後讀取 /proc 統計，對照 kernel 端目前狀態 ─────────────────
 hdr "━━━━  Kernel-side stats  ━━━━"
 echo ""
 echo "  /proc/mq_stats"

@@ -7,6 +7,7 @@
 #include "request.h"
 #include "stats.h"
 
+/* FTL 的主要狀態集合；負責串起 mapping、NAND、GC 與統計。 */
 typedef struct {
     const ssd_config_t *config;
     nand_ssd_t nand;
@@ -21,10 +22,12 @@ typedef struct {
     ssd_statistics_t stats;
 } ftl_context_t;
 
+/* 模擬器目前使用單一全域 FTL instance。 */
 extern ftl_context_t g_ftl;
 
 int ftl_init(const ssd_config_t *config);
 void ftl_destroy(void);
+/* FTL 入口：scheduler 只需要丟 request，不需要知道 NAND 細節。 */
 bool ftl_handle_request(ftl_context_t *ftl, const request_t *request);
 
 #endif

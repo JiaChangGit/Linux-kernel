@@ -61,6 +61,7 @@ bool free_block_pool_get_min_erase_block(const free_block_pool_t *pool,
     uint32_t best = pool->items[idx];
     uint32_t best_erase = erase_count[best];
 
+    /* 保留給 wear leveling：優先挑 erase count 較低的 free block。 */
     for (uint32_t i = 0; i < pool->count; i++) {
         uint32_t candidate = pool->items[idx];
         if (erase_count[candidate] < best_erase) {

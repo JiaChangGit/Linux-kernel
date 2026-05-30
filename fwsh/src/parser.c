@@ -1,28 +1,31 @@
 /*
- * parser.c — 命令列解析器
+ * parser.c - 命令列解析器
  *
- * 解析目標：將使用者輸入的原始字串轉換為 Pipeline 結構。
+ * 目的：
+ *   將使用者輸入的一行文字轉成 Pipeline 結構。
+ *   parser 只處理語法，不負責執行指令。
  *
- * 範例輸入：  cat firmware.bin | hexdump 0x100 > dump.txt &
- * 解析結果：
- *   Pipeline {
- *     ncmds = 2, background = 1,
- *     cmds[0] = { argv=["cat","firmware.bin"], in_file=NULL, out_file=NULL },
- *     cmds[1] = { argv=["hexdump","0x100"],   in_file=NULL, out_file="dump.txt"
- * }
- *   }
+ * 範例：
+ *   cat firmware.bin | hexdump 0x100 > dump.txt &
+ *
+ * 解析成：
+ *   - Pipeline.ncmds = 2
+ *   - Pipeline.background = 1
+ *   - cmds[0].argv = ["cat", "firmware.bin", NULL]
+ *   - cmds[1].argv = ["hexdump", "0x100", NULL]
+ *   - cmds[1].out_file = "dump.txt"
  *
  * 解析策略：
- *   採用「詞法分析（Lexer）+ 遞增建構」方式。
- *   Lexer 維護一個游標（pos）在輸入字串上滑動，
- *   遇到特殊字元時回傳對應 Token，遇到一般文字時讀取完整的「詞」。
+ *   用 Lexer 保存目前讀取位置，從左到右掃描字串。
+ *   遇到一般文字就讀成 word；遇到 |、<、>、& 就更新 Pipeline。
  *
- * 引號處理：
- *   - 單引號：內容完全 literal，不做任何轉義。例：'hello world' → 一個詞。
- *   - 雙引號：支援 \" 和 \\ 轉義，其他字元 literal。
+ * 引號規則：
+ *   - 單引號：內容原樣保留，不處理跳脫。
+ *   - 雙引號：支援 \" 和 \\，其他字元原樣保留。
  *
  * 記憶體管理：
- *   所有字串以 strdup() 複製到 heap，free_pipeline() 負責全部釋放。
+ *   parser 會用 strdup() 複製 argv 與檔名。
+ *   呼叫端必須用 free_pipeline() 釋放。
  */
 
 #include "parser.h"
@@ -32,16 +35,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ── Lexer 結構 ──────────────────────────────────── */
+/* ── Lexer 狀態 ──────────────────────────────────── */
 
 /*
- * Lexer 只是一個「帶游標的字串讀取器」。
- * 刻意不用全域變數，讓 parse_line 可重入（reentrant），
- * 這在多執行緒環境下很重要。
+ * Lexer 是帶有游標的唯讀字串讀取器。
+ * input 指向原始命令列，pos 表示目前讀到哪個 byte。
+ * 狀態放在區域變數中，避免 parser 依賴全域游標。
  */
 typedef struct {
-  const char* input; /* 指向原始輸入字串，不修改它 */
-  int pos;           /* 當前讀取位置（byte index）  */
+  const char* input; /* 原始輸入字串；parser 不修改內容 */
+  int pos;           /* 目前讀取位置，以 byte 為單位 */
 } Lexer;
 
 static void lexer_init(Lexer* lex, const char* input) {
@@ -49,65 +52,64 @@ static void lexer_init(Lexer* lex, const char* input) {
   lex->pos = 0;
 }
 
-/* 跳過所有空白字元（空格、Tab） */
+/* 跳過空白字元，讓主迴圈直接看下一個有效符號。 */
 static void skip_whitespace(Lexer* lex) {
   while (lex->input[lex->pos] && isspace((unsigned char)lex->input[lex->pos]))
     lex->pos++;
 }
 
 /*
- * read_word - 讀取一個「詞」到 buf
+ * read_word - 從目前位置讀出一個 word
  *
- * 停止條件：空白、|、<、>、&、\0
- * 特殊處理：引號（單引號/雙引號）內的內容整體視為一個詞的一部分。
+ * 停止條件：
+ *   未被引號包住的空白、|、<、>、& 或字串結尾。
  *
- * 回傳：讀取到的字元數
+ * 引號內的空白會保留在同一個 word。
+ * 回傳值是寫入 buf 的字元數。
  */
 static int read_word(Lexer* lex, char* buf, int bufsz) {
   int len = 0;
   char c;
 
   while ((c = lex->input[lex->pos]) != '\0') {
-    /* 遇到未被引號包住的特殊字元，停止讀取 */
+    /* 未被引號包住的特殊字元由主解析迴圈處理。 */
     if (isspace((unsigned char)c) || c == '|' || c == '<' || c == '>' ||
         c == '&')
       break;
 
     if (c == '\'') {
       /*
-       * 單引號：消費開頭的 '，然後把所有內容直接複製，
-       * 直到找到配對的結尾 '。
-       * Shell 規範：單引號內不允許任何轉義。
+       * 單引號內全部視為一般文字。
+       * 例：'a b' 會形成同一個 argv，不會被空白切開。
        */
-      lex->pos++; /* 消費開頭 ' */
+      lex->pos++; /* 跳過開頭的 ' */
       while ((c = lex->input[lex->pos]) != '\0' && c != '\'') {
         if (len + 1 < bufsz) buf[len++] = c;
         lex->pos++;
       }
-      if (c == '\'') lex->pos++; /* 消費結尾 ' */
+      if (c == '\'') lex->pos++; /* 跳過結尾的 ' */
 
     } else if (c == '"') {
       /*
-       * 雙引號：支援 \" 跳脫（允許在字串內含雙引號）
-       *         和 \\ 跳脫（允許含反斜線）。
-       * 其他 \x 組合保持原樣（不處理 $var 展開等進階功能）。
+       * 雙引號也會保留空白。
+       * 目前只處理 \" 與 \\，不做 $VAR 展開或命令替換。
        */
-      lex->pos++; /* 消費開頭 " */
+      lex->pos++; /* 跳過開頭的 " */
       while ((c = lex->input[lex->pos]) != '\0' && c != '"') {
         if (c == '\\') {
           char next = lex->input[lex->pos + 1];
           if (next == '"' || next == '\\') {
-            lex->pos++; /* 跳過反斜線 */
+            lex->pos++; /* 跳過跳脫用的反斜線 */
             c = lex->input[lex->pos];
           }
         }
         if (len + 1 < bufsz) buf[len++] = c;
         lex->pos++;
       }
-      if (c == '"') lex->pos++; /* 消費結尾 " */
+      if (c == '"') lex->pos++; /* 跳過結尾的 " */
 
     } else {
-      /* 普通字元，直接加入 */
+      /* 一般字元直接加入目前 word。 */
       if (len + 1 < bufsz) buf[len++] = c;
       lex->pos++;
     }
@@ -117,7 +119,7 @@ static int read_word(Lexer* lex, char* buf, int bufsz) {
   return len;
 }
 
-/* ── 主解析函式 ──────────────────────────────────── */
+/* ── 主解析流程 ──────────────────────────────────── */
 
 int parse_line(const char* line, Pipeline* pipeline) {
   Lexer lex;
@@ -127,26 +129,29 @@ int parse_line(const char* line, Pipeline* pipeline) {
   lexer_init(&lex, line);
   memset(pipeline, 0, sizeof(*pipeline));
 
-  /* 初始化第一段 Cmd */
+  /* 一開始至少有第一段 Cmd。 */
   Cmd* cur = &pipeline->cmds[0];
   memset(cur, 0, sizeof(*cur));
 
   /*
-   * 主解析迴圈：每次迭代處理一個 Token。
-   * Token 是 Lexer 從輸入字串中識別出的最小有意義單元。
+   * 主迴圈每次處理一個語法單元：
+   *   word 加到 argv。
+   *   | 建立下一段 Cmd。
+   *   <、>、>> 記錄重導向檔名。
+   *   & 標記背景執行。
    */
   while (1) {
     skip_whitespace(&lex);
     char c = lex.input[lex.pos];
 
     if (c == '\0' || c == '\n') {
-      /* 輸入結束 */
+      /* 讀到字串結尾，解析完成。 */
       break;
 
     } else if (c == '|') {
       /*
-       * 管線符號：目前 Cmd 結束，建立下一個。
-       * 下一個 Cmd 的 stdin 會在 executor 中用 pipe() + dup2() 連接。
+       * | 代表目前 Cmd 結束。
+       * executor 會用 pipe() 把前一段 stdout 接到下一段 stdin。
        */
       lex.pos++;
       cmd_idx++;
@@ -158,14 +163,14 @@ int parse_line(const char* line, Pipeline* pipeline) {
       memset(cur, 0, sizeof(*cur));
 
     } else if (c == '&') {
-      /* 背景執行旗標 */
+      /* & 只標記整個 Pipeline 背景執行。 */
       lex.pos++;
       pipeline->background = 1;
 
     } else if (c == '<') {
       /*
-       * 輸入重導向：< filename
-       * 子行程在 executor 中會 open() 後 dup2() 到 STDIN_FILENO。
+       * < filename：
+       * parser 只保存檔名，真正 open() 與 dup2() 在 executor child 內做。
        */
       lex.pos++;
       skip_whitespace(&lex);
@@ -178,12 +183,13 @@ int parse_line(const char* line, Pipeline* pipeline) {
 
     } else if (c == '>') {
       /*
-       * 輸出重導向：> filename 或 >> filename（追加模式）
+       * > filename 或 >> filename：
+       * 只記錄檔名與是否追加，實際開檔由 executor 處理。
        */
       lex.pos++;
       if (lex.input[lex.pos] == '>') {
         lex.pos++;
-        cur->out_append = 1; /* >> 追加模式 */
+        cur->out_append = 1; /* >> 代表追加到檔案尾端。 */
       }
       skip_whitespace(&lex);
       read_word(&lex, wordbuf, sizeof(wordbuf));
@@ -194,23 +200,23 @@ int parse_line(const char* line, Pipeline* pipeline) {
       cur->out_file = strdup(wordbuf);
 
     } else {
-      /* 一般詞（指令名稱或引數），加入目前 Cmd 的 argv */
+      /* 一般 word 可能是指令名稱，也可能是參數。 */
       read_word(&lex, wordbuf, sizeof(wordbuf));
-      if (wordbuf[0] == '\0') continue; /* 不應發生，但防禦性判斷 */
+      if (wordbuf[0] == '\0') continue; /* 防止空 word 進入 argv。 */
 
       if (cur->argc >= MAX_ARGS - 1) {
         fprintf(stderr, "fwsh: too many arguments (max %d)\n", MAX_ARGS - 1);
         return -1;
       }
       cur->argv[cur->argc++] = strdup(wordbuf);
-      cur->argv[cur->argc] = NULL; /* 維持 NULL 結尾，execvp 需要 */
+      cur->argv[cur->argc] = NULL; /* execvp() 需要 NULL 結尾的 argv。 */
     }
   }
 
   /*
-   * 計算有效的 Cmd 數量。
-   * 如果輸入以 | 結尾（例如 "ls | "），最後一段 argc == 0，
-   * 此時應修正 ncmds 以避免執行空的 Cmd。
+   * 設定有效 Cmd 數量。
+   * 若使用者輸入以 | 結尾，例如 "ls | "，最後一段沒有 argv，
+   * 這裡會略過空 Cmd，避免 executor 嘗試執行空命令。
    */
   pipeline->ncmds = cmd_idx + 1;
   if (pipeline->ncmds > 1 && pipeline->cmds[pipeline->ncmds - 1].argc == 0)
@@ -219,19 +225,19 @@ int parse_line(const char* line, Pipeline* pipeline) {
   return 0;
 }
 
-/* ── 記憶體釋放 ──────────────────────────────────── */
+/* ── Pipeline 記憶體釋放 ──────────────────────────── */
 
 void free_pipeline(Pipeline* pipeline) {
   for (int i = 0; i < pipeline->ncmds; i++) {
     Cmd* cmd = &pipeline->cmds[i];
 
-    /* 釋放所有 argv 字串 */
+    /* argv 中每個字串都由 parse_line() 的 strdup() 建立。 */
     for (int j = 0; j < cmd->argc; j++) {
       free(cmd->argv[j]);
       cmd->argv[j] = NULL;
     }
 
-    /* 釋放重導向檔名 */
+    /* in_file/out_file 也由 parser 配置，這裡一併釋放。 */
     free(cmd->in_file);
     free(cmd->out_file);
     cmd->in_file = NULL;

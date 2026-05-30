@@ -3,10 +3,12 @@
 
 #include "common.h"
 
+/* 目前模擬器只支援寫入 request，保留 enum 方便未來擴充 read/trim。 */
 typedef enum {
     REQUEST_TYPE_WRITE = 0,
 } request_type_t;
 
+/* 韌體內部 request。由 NVMe SQ entry 轉換而來，並在 scheduler 補上時間欄位。 */
 typedef struct {
     request_type_t type;
     uint16_t command_id;
@@ -21,6 +23,7 @@ typedef struct {
     uint64_t total_latency_us;
 } request_t;
 
+/* 固定容量的環形佇列，用 head/tail/size 管理未處理 request。 */
 typedef struct {
     request_t *entries;
     uint32_t head;

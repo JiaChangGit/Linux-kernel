@@ -9,6 +9,7 @@ void stats_init(ssd_statistics_t *stats)
 
 double stats_write_amplification(const ssd_statistics_t *stats)
 {
+    /* 沒有 host write 時避免除以 0，回傳 0 表示沒有可計算樣本。 */
     if (stats->host_page_count == 0) {
         return 0.0;
     }
@@ -17,6 +18,7 @@ double stats_write_amplification(const ssd_statistics_t *stats)
 
 uint64_t stats_average_latency_us(const ssd_statistics_t *stats)
 {
+    /* 平均延遲以 request 為分母，不以 page 為分母。 */
     if (stats->host_request_count == 0) {
         return 0;
     }
@@ -28,6 +30,7 @@ void stats_update_request(ssd_statistics_t *stats,
                           uint64_t service_latency_us,
                           uint64_t total_latency_us)
 {
+    /* 累積值用於平均，max 欄位保留尾端延遲尖峰。 */
     stats->total_queue_latency_us += queue_latency_us;
     stats->total_service_latency_us += service_latency_us;
     stats->total_latency_us += total_latency_us;

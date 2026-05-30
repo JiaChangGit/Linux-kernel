@@ -11,10 +11,12 @@ static bool trace_request_is_in_range(const ftl_context_t *ftl, uint64_t lba, ui
 {
     uint64_t end_lpn_exclusive;
 
+    /* 空 request 不會碰 L2P，視為合法 no-op。 */
     if (size == 0) {
         return true;
     }
 
+    /* end_lpn_exclusive >= lba 用來擋 unsigned overflow。 */
     end_lpn_exclusive = lba + (uint64_t)size;
     return end_lpn_exclusive >= lba &&
            lba < ftl->config->logical_pages &&
@@ -25,6 +27,7 @@ static bool service_nvme_pipeline(ftl_context_t *ftl,
                                   nvme_controller_t *controller,
                                   request_queue_t *request_queue)
 {
+    /* 固定順序：先 fetch SQ，再跑 scheduler，最後讓 host reap CQ。 */
     (void)nvme_issue_pending(controller, request_queue);
 
     if (!request_queue_is_empty(request_queue) &&
@@ -55,6 +58,7 @@ static int replay_trace(const char *trace_path,
         uint64_t lba = 0;
         uint32_t size = 0;
 
+        /* Trace 支援 # 註解行與空行，方便手動整理 workload。 */
         if (line[0] == '#' || line[0] == '\n') {
             continue;
         }
@@ -77,6 +81,7 @@ static int replay_trace(const char *trace_path,
         }
 
         if (nvme_submit_write(controller, lba, size, submit_timestamp_us) != 0) {
+            /* SQ 滿時先推進 pipeline，釋放 slot 後再提交同一筆 request。 */
             if (!service_nvme_pipeline(ftl, controller, request_queue)) {
                 fclose(fp);
                 return -1;
@@ -97,6 +102,7 @@ static int replay_trace(const char *trace_path,
         }
 
         if (nvme_cq_is_full(controller)) {
+            /* 正常 pipeline 會 reap；這裡是避免 CQ 滿住後續 completion。 */
             if (nvme_reap_completions(controller) == 0) {
                 fclose(fp);
                 return -1;
@@ -122,6 +128,7 @@ int main(int argc, char **argv)
 
     ssd_config_init_default(&config);
 
+    /* CLI 採簡單 parser：選項可放在 trace 前，第一個非選項視為 trace。 */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
             config_path = argv[++i];

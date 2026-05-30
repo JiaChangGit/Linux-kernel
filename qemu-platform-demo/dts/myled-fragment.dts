@@ -1,21 +1,22 @@
 /*
  * myled-fragment.dts
  *
- * Fragment to be merged into the QEMU ARM64 virt machine DTB.
- * The node registers a virtual LED controller at MMIO 0x0d000000.
+ * 這個 fragment 會合併到 QEMU ARM64 virt machine 的 DTB。
+ * myled-controller 固定放在 MMIO 0x0d000000，名稱也固定為
+ * myled-controller@0d000000，避免測試腳本和 driver 彼此漂移。
  *
- * Properties demonstrated:
- *   - compatible  : triggers OF match in the driver
- *   - reg         : MMIO base + size (parsed by platform_get_resource)
- *   - num-leds    : custom u32 property (of_property_read_u32)
- *   - label       : custom string property (of_property_read_string)
- *   - default-brightness : optional init value
- *   - status      : "okay" to activate the node
+ * 屬性用途：
+ *   - compatible  : 觸發 driver 的 OF match
+ *   - reg         : MMIO base + size，probe 時會再次檢查
+ *   - num-leds    : 自訂 u32 屬性
+ *   - label       : 自訂字串屬性
+ *   - default-brightness : 開機預設亮度
+ *   - status      : "okay" 啟用節點
  */
 
 /dts-v1/;
 
-/* This fragment is merged with the QEMU-generated DTB via fdtoverlay */
+/* 這個 fragment 透過 fdtoverlay 合併到 QEMU 產生的 base DTB。 */
 /plugin/;
 
 / {
@@ -23,33 +24,35 @@
         target-path = "/";
 
         __overlay__ {
+            #address-cells = <2>;
+            #size-cells = <2>;
 
             /*
-            * myled platform device
-            * mapped to MMIO region 0x0d000000
-            * size: 0x1000 (4KB register space)
+            * myled platform device。
+            * MMIO 固定為 0x0d000000，大小 0x1000，必須和 driver 常數一致。
             */
             myled: myled-controller@0d000000 {
 
-                /* Driver binding key (must match of_match_table) */
+                /* Driver binding key，必須和 of_match_table 相符。 */
                 compatible = "myvendor,myled-v1";
+                myvendor,simulated;
 
                 /*
-                * Physical MMIO region
-                * [base address, size]
+                * 實體 MMIO 範圍：[base address, size]。
+                * 這個位址由 dts/patch_dtb.sh 先對 QEMU base DTB 做 overlap 檢查。
                 */
                 reg = <0x0 0x0d000000 0x0 0x1000>;
 
-                /* Number of LEDs controlled by this device */
+                /* LED 數量。 */
                 num-leds = <4>;
 
-                /* Human readable label */
+                /* 人類可讀 label，probe 時會印出方便比對。 */
                 label = "demo-rgb-led";
 
-                /* Default brightness at boot */
+                /* 開機預設亮度，driver 端會 clamp 到 0..255。 */
                 default-brightness = <180>;
 
-                /* Enable device */
+                /* 啟用裝置。 */
                 status = "okay";
             };
         };

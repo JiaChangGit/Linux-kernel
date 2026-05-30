@@ -12,6 +12,7 @@ static bool service_pipeline(ftl_context_t *ftl,
                              nvme_controller_t *controller,
                              request_queue_t *request_queue)
 {
+    /* 測試版 pipeline 與 main.c 相同：SQ -> RQ -> scheduler -> CQ reap。 */
     (void)nvme_issue_pending(controller, request_queue);
 
     if (!request_queue_is_empty(request_queue) &&
@@ -25,6 +26,7 @@ static bool service_pipeline(ftl_context_t *ftl,
 
 static void init_small_config(ssd_config_t *config)
 {
+    /* 小容量設定可快速觸發 GC，測試也比較容易看出邊界條件。 */
     ssd_config_init_default(config);
     config->total_blocks = 8;
     config->pages_per_block = 4;
@@ -40,6 +42,7 @@ static void init_small_config(ssd_config_t *config)
 
 static log_level_t disable_logs(void)
 {
+    /* 預期會失敗的測試先關 log，避免錯誤訊息干擾測試輸出。 */
     log_level_t previous_log_level = g_log_level;
     g_log_level = LOG_LEVEL_NONE;
     return previous_log_level;
@@ -52,6 +55,7 @@ static void restore_logs(log_level_t previous_log_level)
 
 static void assert_latency_accounting_consistent(const ssd_statistics_t *stats)
 {
+    /* Queue latency 與 service latency 應可加回 total latency。 */
     assert(stats->total_queue_latency_us + stats->total_service_latency_us ==
            stats->total_latency_us);
 }
@@ -70,6 +74,7 @@ static void test_config_rejects_impossible_geometry(void)
     ssd_config_t config;
     log_level_t previous_log_level;
 
+    /* logical_pages 超過實體容量時，FTL mapping 會沒有合法 PPA 可指。 */
     ssd_config_init_default(&config);
     config.total_blocks = 2;
     config.pages_per_block = 4;
@@ -79,6 +84,7 @@ static void test_config_rejects_impossible_geometry(void)
     assert(ssd_config_validate(&config) != 0);
     restore_logs(previous_log_level);
 
+    /* GC threshold 為 0 會讓預防性 GC 失去意義。 */
     ssd_config_init_default(&config);
     config.gc_free_block_threshold = 0;
 
@@ -94,6 +100,7 @@ static void test_config_load_rejects_malformed_entries(void)
     ssd_config_t config;
     log_level_t previous_log_level;
 
+    /* 數值欄位必須是純數字，單位請由 key 名稱表達。 */
     write_test_file(bad_value_path, "program_latency_us=200us\n");
     ssd_config_init_default(&config);
 
@@ -102,6 +109,7 @@ static void test_config_load_rejects_malformed_entries(void)
     restore_logs(previous_log_level);
     assert(remove(bad_value_path) == 0);
 
+    /* 未知 key 直接失敗，避免使用者誤以為設定已生效。 */
     write_test_file(unknown_key_path, "program_latency_us=200\nmystery_key=1\n");
     ssd_config_init_default(&config);
 
@@ -120,6 +128,7 @@ static void test_nvme_sq_cq_lifecycle(void)
     assert(nvme_controller_init(&controller, 2) == 0);
     assert(request_queue_init(&request_queue, 2) == 0);
 
+    /* 深度為 2 時，第三筆 submit 應失敗，驗證 SQ full 行為。 */
     assert(nvme_submit_write(&controller, 10, 2, 0) == 0);
     assert(nvme_submit_write(&controller, 20, 4, 5) == 0);
     assert(nvme_submit_write(&controller, 30, 1, 10) != 0);
@@ -128,6 +137,7 @@ static void test_nvme_sq_cq_lifecycle(void)
     assert(nvme_issue_pending(&controller, &request_queue) == 2);
     assert(nvme_sq_is_empty(&controller));
 
+    /* issue 後 command_id、LBA 與 length 必須完整保留到 request_t。 */
     assert(request_queue_dequeue(&request_queue, &request));
     assert(request.command_id == 0);
     assert(request.queue_id == 1);
@@ -143,6 +153,7 @@ static void test_nvme_sq_cq_lifecycle(void)
     assert(nvme_post_completion(&controller, &request, NVME_STATUS_SUCCESS, 150));
 
     assert(nvme_cq_is_full(&controller));
+    /* Host reap completion 後，CQ slot 應全部釋放。 */
     assert(nvme_reap_completions(&controller) == 2);
     assert(nvme_cq_is_empty(&controller));
 
@@ -165,6 +176,7 @@ static void test_scheduler_pipeline_posts_completions(void)
     assert(nvme_submit_write(&controller, 4, 2, 10) == 0);
     assert(service_pipeline(&g_ftl, &controller, &request_queue));
 
+    /* 兩筆 host request 共寫 6 pages，沒有 GC 時 NAND writes 也應為 6。 */
     assert(g_ftl.stats.host_request_count == 2);
     assert(g_ftl.stats.host_page_count == 6);
     assert(g_ftl.stats.nand_write_count == 6);
@@ -209,6 +221,7 @@ static void assert_mapping_is_live(const ftl_context_t *ftl, uint32_t lpn)
     physical_page_address_t ppa;
     const nand_page_t *page;
 
+    /* L2P 查到的 PPA 必須仍指向有效 page，這是 FTL 正確性的核心。 */
     assert(mapping_get_physical_page(ftl->mapping_table, lpn, &ppa));
     page = &ftl->nand.blocks[ppa.block_index].pages[ppa.page_index];
     assert(page->state == NAND_PAGE_VALID);
@@ -234,6 +247,7 @@ static void test_gc_preserves_valid_mappings(void)
     };
 
     init_small_config(&config);
+    /* 這組 geometry 會讓覆寫產生 invalid page，進而觸發 GC。 */
     config.total_blocks = 6;
     config.pages_per_block = 4;
     config.logical_pages = 20;
@@ -279,6 +293,7 @@ static void test_long_request_preserves_gc_migration_space(void)
     };
 
     init_small_config(&config);
+    /* 小容量加長 request，用來驗證寫入中途會預先保留 GC 搬移空間。 */
     config.total_blocks = 4;
     config.pages_per_block = 4;
     config.logical_pages = 16;

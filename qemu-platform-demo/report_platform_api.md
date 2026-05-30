@@ -1,872 +1,1429 @@
-# QEMU Platform Device Driver API 技術分析報告
+# QEMU Platform Driver API 技術分析報告
 
-本報告只根據 `/qemu-platform-demo` 目前實際存在的檔案進行分析，主要依據為 source code，其次為 header、build system、script、DTS 與 README/comment。原報告已涵蓋 project structure、semantic elements、API inventory、call graph、resource tracing 與 architecture report；本次更新保留這個分析順序，補上可直接追溯的 execution flow、callback chain、ownership/lifecycle 與風險分析。
+本報告分析 `qemu-platform-demo` 目前實際存在的程式碼、DTS、Makefile、rootfs script 與 build/run script。內容不假設未實作功能，也不把設計想像寫成事實。
 
-以下內容分成：
+報告分成兩種層級：
 
-- `# Direct Observation`：可從目前程式碼、DTS、Makefile 或 scripts 直接驗證。
-- `# Conservative Inference`：只基於已存在的呼叫關係做保守推論，會明確標示。
-- 若未能從 codebase 驗證，會標示「目前程式碼中未觀察到」或「無法從現有內容確認」。
+- Direct Observation：可直接從專案檔案或實際執行結果驗證。
+- Conservative Inference：根據現有呼叫關係做保守推論，會明確標示。
 
----
+## 0. 專案總覽
 
-## 第一階段：Codebase Trace
+本專案說明 Linux Platform Driver 在 QEMU ARM64 `virt` machine 上的主要生命週期：
 
-### 1. Project Structure
+```text
+DTS overlay
+  -> DTB
+  -> QEMU boot
+  -> platform_device
+  -> myled_ctrl platform_driver
+  -> probe()
+  -> sysfs attributes
+  -> shell test
+```
 
-#### # Direct Observation
+固定硬體描述：
 
-`qemu-platform-demo` 的可驗證結構如下：
+| 項目 | 值 |
+|---|---|
+| Device Tree node | `myled-controller@0d000000` |
+| MMIO base | `0x0d000000` |
+| MMIO size | `0x1000` |
+| MMIO range | `0x0d000000-0x0d000fff` |
+| compatible | `myvendor,myled-v1` |
+| driver module | `myled_ctrl.ko` |
+| sysfs group | `myled` |
+
+## 0A. API 關鍵字地圖
+
+讀 Linux driver API 時，最容易卡住的地方不是單一函式，而是不知道這些名詞分別屬於哪一層。下面這張表先把本專案會遇到的關鍵字放在同一張地圖裡。
+
+| 關鍵字 | 英文 / API 名稱 | 所屬層級 | 在本專案中的位置 | 先理解什麼 |
+|---|---|---|---|---|
+| 平台匯流排 | Platform Bus | Linux driver model | kernel 內部機制 | 負責把 `platform_device` 和 `platform_driver` 配對。 |
+| 平台裝置 | `struct platform_device` | Device model | 由 DTB 中的 `myled-controller@0d000000` 產生 | 代表「系統裡有這個硬體」。 |
+| 平台驅動 | `struct platform_driver` | Driver model | `myled_driver` | 代表「這個 driver 會處理哪些 platform device」。 |
+| 探測函式 | `probe()` | Driver lifecycle | `myled_probe()` | device 和 driver 配對成功後的初始化入口。 |
+| 移除函式 | `remove()` | Driver lifecycle | `myled_remove()` | driver unbind 或 module remove 時的清理入口。 |
+| 相容字串 | `compatible` | Device Tree | `myvendor,myled-v1` | DT node 與 driver 的配對 key。 |
+| OF 配對表 | `of_device_id` | Device Tree match | `myled_of_match[]` | driver 宣告自己支援哪些 `compatible`。 |
+| 模組別名表 | `MODULE_DEVICE_TABLE()` | Module metadata | `MODULE_DEVICE_TABLE(of, ...)` | 把 match table 資訊放進 module metadata。 |
+| 位址宣告 | `reg` property | Device Tree resource | `<0x0 0x0d000000 0x0 0x1000>` | 描述 MMIO base 和 size。 |
+| 資源 | `struct resource` | Kernel resource model | `platform_get_resource()` 回傳 | kernel 把 DT `reg` 轉成 driver 可讀的 resource。 |
+| MMIO | Memory-Mapped I/O | Hardware access | `0x0d000000-0x0d000fff` | 硬體 register 出現在 CPU 位址空間。 |
+| I/O 記憶體指標 | `void __iomem *` | Kernel type annotation | `priv->base` | 標示這不是一般 RAM，不能直接解參考。 |
+| 暫存器讀寫 | `readl()` / `writel()` | MMIO accessor | register helper 內 | 讀寫 32-bit MMIO register。 |
+| 託管資源 | `devm_*` | Resource management | `devm_kzalloc()`、`devm_ioremap_resource()` | 生命週期跟著 device，比手動清理簡單。 |
+| 私有資料 | Driver private data | Driver state | `struct myled_priv` | 每個 device 一份狀態，不用全域變數。 |
+| 驅動資料 | drvdata | Driver state binding | `platform_set_drvdata()`、`dev_get_drvdata()` | 讓 callback 找回 `priv`。 |
+| 使用者空間介面 | sysfs | User interface | `/sys/bus/platform/devices/.../myled/` | 讓 user space 用檔案讀寫 device 屬性。 |
+| 屬性檔案 | `device_attribute` | sysfs | `enable`、`brightness`、`status` | sysfs 中每個檔案對應一組 show/store callback。 |
+| 讀改寫 | Read-Modify-Write, RMW | Register operation | `myled_reg_update_bits()` | 修改 register 某些 bit 時要避免覆蓋其他 bit。 |
+| 自旋鎖 | `spinlock_t` | Synchronization | `priv->lock` | 保護短時間、不睡眠的 register 操作。 |
+| 錯誤碼 | `-EINVAL`、`-ENODEV`、`-ENOMEM` | Error handling | 多個 probe/sysfs path | kernel API 常用負值回報錯誤原因。 |
+| 初始根檔案系統 | initramfs | Boot runtime | `rootfs/initramfs.cpio.gz` | QEMU 開機後的最小 rootfs，負責載入 module 和測試。 |
+
+### 從關鍵字串成流程
+
+```mermaid
+flowchart LR
+    DT["Device Tree node<br/>compatible + reg"] --> PDEV["platform_device"]
+    PDEV --> MATCH["Platform bus match"]
+    MATCH --> PDRV["platform_driver"]
+    PDRV --> PROBE["probe()"]
+    PROBE --> RES["struct resource"]
+    RES --> PRIV["struct myled_priv"]
+    PRIV --> SYSFS["sysfs attributes"]
+    SYSFS --> USER["cat / echo"]
+```
+
+這張圖的讀法是：DTS 先讓 kernel 建立 `platform_device`，driver 用 `compatible` 配對後進入 `probe()`，`probe()` 再取得 resource、建立 private data，最後建立 sysfs 讓 user space 操作。
+
+## 1. Project Structure
+
+### Direct Observation
 
 | 類別 | 檔案 | 角色 |
 |---|---|---|
-| source file | `driver/myled_ctrl.c` | Linux platform driver 主體，包含 register helper、hardware init/shutdown、sysfs attributes、probe/remove、PM callback、OF match table 與 module registration。 |
-| header file | `driver/myled_ctrl.h` | 定義 register offset、bit mask、限制值、hardware version、simulated register count 與 `struct myled_priv`。 |
-| build system | `driver/Makefile` | out-of-tree kernel module build，`obj-m := myled_ctrl.o`，並提供 `install` target 複製 `.ko` 到 `rootfs/overlay/`。 |
-| hardware description | `dts/myled-fragment.dts` | DT overlay fragment，建立 `myled-controller@0d000000` node，宣告 `compatible`、`reg`、`num-leds`、`label`、`default-brightness`、`status`。 |
-| DTB script | `dts/patch_dtb.sh`、`scripts/02_patch_dtb.sh` | dump QEMU virt base DTB，編譯 overlay DTBO，再用 `fdtoverlay` 合併成 `qemu-virt-myled.dtb`。 |
-| build/run scripts | `scripts/00_install_deps.sh`、`01_build_kernel.sh`、`03_build_driver.sh`、`04_build_rootfs.sh`、`05_run_qemu.sh`、`06_clean.sh` | 安裝依賴、下載/建置 kernel、建置 module、打包 initramfs、啟動 QEMU、清理產物。 |
-| rootfs overlay | `rootfs/overlay/init` | QEMU initramfs 的 `/init`，mount proc/sys/dev，`insmod /myled_ctrl.ko`，執行 `/test_myled.sh`，最後 drop to shell。 |
-| rootfs test | `rootfs/overlay/test_myled.sh` | 從 `/sys/bus/platform/devices` 找到包含 `0d000000` 的 device，讀寫 `myled` sysfs attribute。 |
-| docs | `docs/*.png` | build/demo 截圖。此報告未以圖片內容推導 driver 行為。 |
-| README/report | `README_platform.md`、`report_platform.md` | 說明性文件，僅作低優先級佐證。 |
+| Driver source | `driver/myled_ctrl.c` | Platform driver 主體，包含 register helper、probe/remove、sysfs、PM callback、OF match 與 module registration。 |
+| Driver header | `driver/myled_ctrl.h` | 定義 register offset、bit mask、MMIO base/size、限制值與 `struct myled_priv`。 |
+| Driver build | `driver/Makefile` | out-of-tree module build，產生 `myled_ctrl.ko`。 |
+| Device Tree overlay | `dts/myled-fragment.dts` | 建立 `myled-controller@0d000000` 節點。 |
+| DTB patch script | `dts/patch_dtb.sh` | dump QEMU base DTB、檢查 MMIO overlap、編譯 DTBO、合併 final DTB。 |
+| Script wrapper | `scripts/02_patch_dtb.sh` | 從專案根目錄呼叫 DTB patch script。 |
+| Kernel build script | `scripts/01_build_kernel.sh` | 下載並建置 Linux 6.6.30 ARM64 kernel。 |
+| Driver build script | `scripts/03_build_driver.sh` | 呼叫 kernel build system 編譯 module。 |
+| Rootfs build script | `scripts/04_build_rootfs.sh` | 建立 initramfs，檢查 BusyBox 架構與 `.ko` 是否存在。 |
+| QEMU run script | `scripts/05_run_qemu.sh` | 使用 Image、DTB、initramfs 啟動 QEMU。 |
+| Init script | `rootfs/overlay/init` | 掛載 proc/sys/dev，載入 module，執行測試，進入 shell。 |
+| Test script | `rootfs/overlay/test_myled.sh` | 驗證 platform device、of_node、driver binding、sysfs attributes 與讀寫結果。 |
 
-#### Module / Component Relationship
+### Component Relationship
 
-```text
-scripts/01_build_kernel.sh
-  -> linux-6.6.30/arch/arm64/boot/Image
-
-scripts/02_patch_dtb.sh
-  -> dts/patch_dtb.sh
-  -> dts/myled-fragment.dts
-  -> dts/qemu-virt-myled.dtb
-
-scripts/03_build_driver.sh
-  -> driver/Makefile
-  -> driver/myled_ctrl.c + driver/myled_ctrl.h
-  -> rootfs/overlay/myled_ctrl.ko
-
-scripts/04_build_rootfs.sh
-  -> rootfs/overlay/init
-  -> rootfs/overlay/test_myled.sh
-  -> rootfs/overlay/myled_ctrl.ko
-  -> rootfs/initramfs.cpio.gz
-
-scripts/05_run_qemu.sh
-  -> qemu-system-aarch64 -kernel Image -dtb qemu-virt-myled.dtb -initrd initramfs.cpio.gz
-  -> /init
-  -> insmod /myled_ctrl.ko
-  -> platform driver bind
-  -> sysfs /sys/bus/platform/devices/<device>/myled/
+```mermaid
+flowchart TD
+    KBUILD["scripts/01_build_kernel.sh"] --> IMAGE["Image"]
+    DTS["dts/myled-fragment.dts"] --> PATCH["dts/patch_dtb.sh"]
+    PATCH --> DTB["qemu-virt-myled.dtb"]
+    DRIVER["driver/myled_ctrl.c<br/>driver/myled_ctrl.h"] --> KO["myled_ctrl.ko"]
+    KO --> INITRD["initramfs.cpio.gz"]
+    INIT["rootfs/overlay/init"] --> INITRD
+    TEST["rootfs/overlay/test_myled.sh"] --> INITRD
+    IMAGE --> QEMU["QEMU"]
+    DTB --> QEMU
+    INITRD --> QEMU
 ```
 
----
+## 2. Device Tree Interface
 
-### 2. Semantic Element Extraction
+### Direct Observation
 
-#### # Direct Observation
+`dts/myled-fragment.dts` 宣告：
 
-以下只列目前實際存在的元素。
-
-| 類型 | 名稱 | 定義位置 | 說明 |
+| Property | 型態 | 值 | Driver 用途 |
 |---|---|---|---|
-| API / registration macro | `module_platform_driver(myled_driver)` | `driver/myled_ctrl.c:440` | 產生 module init/exit glue，註冊 `struct platform_driver`。 |
-| dispatch table / operation table | `static struct platform_driver myled_driver` | `driver/myled_ctrl.c:429` | `.probe = myled_probe`、`.remove = myled_remove`、`.driver.of_match_table = myled_of_match`、`.driver.pm = &myled_pm_ops`。 |
-| callback | `myled_probe` | `driver/myled_ctrl.c:303` | platform device match 後的初始化 callback。 |
-| callback | `myled_remove` | `driver/myled_ctrl.c:380` | driver unbind/module remove 時的 cleanup callback。 |
-| callback table | `myled_pm_ops` | `driver/myled_ctrl.c:412` | 綁定 system sleep suspend/resume callbacks。 |
-| callback | `myled_suspend` | `driver/myled_ctrl.c:398` | system suspend 時清除 `MYLED_CTRL_ENABLE`。 |
-| callback | `myled_resume` | `driver/myled_ctrl.c:405` | system resume 時設回 `MYLED_CTRL_ENABLE`。 |
-| OF match table | `myled_of_match` | `driver/myled_ctrl.c:419` | 支援 `"myvendor,myled-v1"` 與 `"myvendor,myled"`。 |
-| module alias annotation | `MODULE_DEVICE_TABLE(of, myled_of_match)` | `driver/myled_ctrl.c:423` | 將 OF match table 匯出到 module device table。 |
-| sysfs attribute macro | `DEVICE_ATTR_RW(enable)` | `driver/myled_ctrl.c:176` | 建立 read/write `enable` attribute。 |
-| sysfs attribute macro | `DEVICE_ATTR_RW(brightness)` | `driver/myled_ctrl.c:201` | 建立 read/write `brightness` attribute。 |
-| sysfs attribute macro | `DEVICE_ATTR_RW(color)` | `driver/myled_ctrl.c:224` | 建立 read/write `color` attribute。 |
-| sysfs attribute macro | `DEVICE_ATTR_RW(blink)` | `driver/myled_ctrl.c:250` | 建立 read/write `blink` attribute。 |
-| sysfs attribute macro | `DEVICE_ATTR_RO(status)` | `driver/myled_ctrl.c:260` | 建立 read-only `status` attribute。 |
-| sysfs attribute macro | `DEVICE_ATTR_RO(info)` | `driver/myled_ctrl.c:282` | 建立 read-only `info` attribute。 |
-| dispatch table | `myled_attrs[]` | `driver/myled_ctrl.c:284` | sysfs attribute list，包含 enable、brightness、color、blink、status、info。 |
-| dispatch group | `myled_attr_group` | `driver/myled_ctrl.c:294` | `.name = "myled"`，所以 attribute 會在 device kobject 下的 `myled/` 子目錄。 |
-| register helper | `myled_reg_read` | `driver/myled_ctrl.c:35` | 在 spinlock 保護下讀取 `sim_regs` 或 MMIO `readl`。 |
-| register helper | `myled_reg_write` | `driver/myled_ctrl.c:49` | 在 spinlock 保護下寫入 `sim_regs` 或 MMIO `writel`。 |
-| register helper | `myled_reg_set_bits` | `driver/myled_ctrl.c:60` | read-modify-write 設定位元。 |
-| register helper | `myled_reg_clr_bits` | `driver/myled_ctrl.c:65` | read-modify-write 清除位元。 |
-| lifecycle helper | `myled_hw_init` | `driver/myled_ctrl.c:108` | 讀 VERSION、必要時切 simulated mode、設定 default brightness、enable controller。 |
-| lifecycle helper | `myled_hw_shutdown` | `driver/myled_ctrl.c:139` | 清除 enable/blink/pwm bit，brightness 寫 0。 |
-| memory management | `devm_kzalloc` | 呼叫於 `driver/myled_ctrl.c:312` | 分配 `struct myled_priv`，生命週期綁定 `struct device`。 |
-| resource mapping | `platform_get_resource` | 呼叫於 `driver/myled_ctrl.c:332` | 取得 DT `reg` 轉換後的 MEM resource。 |
-| resource mapping | `devm_ioremap_resource` | 呼叫於 `driver/myled_ctrl.c:340` | request/map MEM resource；失敗時 driver 進入 simulated mode。 |
-| state binding | `platform_set_drvdata` / `dev_set_drvdata` | `driver/myled_ctrl.c:353-354` | 將 `priv` 綁到 platform device/device，供 sysfs 與 PM callbacks 取回。 |
-| synchronization primitive | `spinlock_t lock` | `driver/myled_ctrl.h:45` | 保護 register access path。 |
-| compiler annotation | `void __iomem *base` | `driver/myled_ctrl.h:40` | 標示 MMIO base pointer。 |
-| compiler annotation | `__maybe_unused` | `driver/myled_ctrl.c:398`、`405` | 用於 PM callbacks，避免某些 config 下 unused warning。 |
-| conditional compilation macro | `SET_SYSTEM_SLEEP_PM_OPS` | `driver/myled_ctrl.c:413` | 依 kernel PM config 展開 system sleep callbacks。 |
-| external interface | sysfs files under `.../myled/` | `driver/myled_ctrl.c:284-296` | user space 透過 rootfs test script 讀寫。 |
-| external interface | Device Tree node | `dts/myled-fragment.dts:26-32` | 透過 `compatible` 觸發 OF matching，透過 `reg` 與 custom properties 餵給 probe/init。 |
+| `compatible` | string | `myvendor,myled-v1` | 與 `myled_of_match[]` 配對，觸發 `probe()`。 |
+| `myvendor,simulated` | boolean | present | 要求 driver 使用 simulated register bank。 |
+| `reg` | address/size cells | `<0x0 0x0d000000 0x0 0x1000>` | 轉成 platform memory resource。 |
+| `num-leds` | u32 | `<4>` | 存入 `priv->num_leds`，提供 `info` 輸出。 |
+| `label` | string | `demo-rgb-led` | `probe()` 印出 log，方便確認節點。 |
+| `default-brightness` | u32 | `<180>` | `myled_hw_init()` 初始化亮度。 |
+| `status` | string | `okay` | 啟用節點。 |
 
-#### 目前程式碼中未觀察到
+### Address Cells
 
-- IRQ registration，例如 `request_irq`、`devm_request_irq`。
-- workqueue、tasklet、timer 或 threaded IRQ。
-- wait queue、completion、mutex、atomic API。
-- char device、miscdevice、ioctl、netlink、debugfs。
-- runtime PM callbacks，例如 `.runtime_suspend` 或 `.runtime_resume`；目前只有 `pm_runtime_enable/disable` 與 system sleep PM ops。
-- DMA、buffer ownership transfer、userspace mmap。
+DTS 使用：
 
----
-
-### 3. API / Macro Inventory
-
-#### Initialization
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 / 呼叫來源 | 用途 | 關聯 struct/data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|
-| `module_platform_driver(myled_driver)` | macro | `driver/myled_ctrl.c:440` | module load path；rootfs `init` 執行 `insmod /myled_ctrl.ko` 於 `rootfs/overlay/init:16` | 註冊 platform driver | `myled_driver` | 讓 kernel platform bus 可以用 OF table match device 並呼叫 `myled_probe`。 |
-| `myled_driver` | dispatch table | `driver/myled_ctrl.c:429` | `module_platform_driver` | 提供 probe/remove/driver metadata | `myled_probe`、`myled_remove`、`myled_of_match`、`myled_pm_ops` | 將 Linux driver core 的事件 dispatch 到本 driver callback。 |
-| `myled_of_match` | match table | `driver/myled_ctrl.c:419` | driver core matching；DTS compatible 於 `dts/myled-fragment.dts:27` | OF compatible matching | `"myvendor,myled-v1"`、`"myvendor,myled"` | DTS node compatible match 後，probe 才會被呼叫。 |
-| `MODULE_DEVICE_TABLE(of, myled_of_match)` | module annotation | `driver/myled_ctrl.c:423` | build/module metadata | 匯出 OF alias | `myled_of_match` | 支援 module device table metadata；是否自動載入需依 userspace/module loader，現有 rootfs 是手動 `insmod`。 |
-| `myled_probe` | callback | `driver/myled_ctrl.c:303` | platform bus match 後呼叫 | 分配 private data、解析 DT、map MMIO、init HW、建立 sysfs、enable PM runtime | `struct platform_device`、`struct myled_priv`、`myled_attr_group` | 是 driver 的主要 entry point。 |
-| `devm_kzalloc` | managed allocation API | 呼叫於 `driver/myled_ctrl.c:312` | `myled_probe` | 分配並清零 `priv` | `struct myled_priv` | 若失敗回傳 `-ENOMEM`，probe 中止。 |
-| `spin_lock_init` | synchronization init | 呼叫於 `driver/myled_ctrl.c:317` | `myled_probe` | 初始化 `priv->lock` | `spinlock_t lock` | register helper 可安全進入 lock/unlock path。 |
-| `of_property_read_u32` | OF property API | 呼叫於 `driver/myled_ctrl.c:320`、`123` | `myled_probe`、`myled_hw_init` | 讀 `num-leds` 與 `default-brightness` | DT node | `num-leds` 缺失時 fallback 1；`default-brightness` 缺失時 fallback 128。 |
-| `of_property_read_string` | OF property API | 呼叫於 `driver/myled_ctrl.c:328` | `myled_probe` | 讀 `label` 並印 log | DT node | 不影響 state；只作 log。 |
-| `platform_get_resource` | platform resource API | 呼叫於 `driver/myled_ctrl.c:332` | `myled_probe` | 取得 MEM resource | `reg = <0x0 0x0d000000 0x0 0x1000>` | 若無 resource，設定 `priv->simulated = true`。 |
-| `devm_ioremap_resource` | managed MMIO API | 呼叫於 `driver/myled_ctrl.c:340` | `myled_probe` | map MMIO resource | `priv->base` | 失敗時清 `base` 並進入 simulated mode，而非 probe fail。 |
-| `platform_set_drvdata` / `dev_set_drvdata` | state binding API | 呼叫於 `driver/myled_ctrl.c:353-354` | `myled_probe` | 綁定 `priv` | `pdev`、`dev`、`priv` | sysfs show/store 與 PM callbacks 能透過 `dev_get_drvdata` / `platform_get_drvdata` 找回 state。 |
-| `myled_hw_init` | lifecycle helper | `driver/myled_ctrl.c:108` | `myled_probe` | VERSION check、sim fallback、brightness init、enable controller | `priv->simulated`、`sim_regs`、register macros | 成功後 device 進入可操作狀態；目前實作固定 return 0。 |
-| `sysfs_create_group` | sysfs registration API | 呼叫於 `driver/myled_ctrl.c:364` | `myled_probe` | 建立 `myled/` attribute group | `myled_attr_group` | 成功後 userspace runtime path 可讀寫 sysfs；失敗會呼叫 `myled_hw_shutdown` 並回傳錯誤。 |
-| `pm_runtime_enable` | PM API | 呼叫於 `driver/myled_ctrl.c:372` | `myled_probe` | 啟用 runtime PM framework state | `struct device` | 目前程式碼未註冊 runtime PM callbacks，因此只看到 enable/disable 動作。 |
-
-#### Registration / External Interface
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 / 呼叫來源 | 用途 | 關聯 struct/data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|
-| `DEVICE_ATTR_RW(enable)` | macro | `driver/myled_ctrl.c:176` | `myled_attrs[]` | 產生 enable attribute | `enable_show`、`enable_store` | 使用者讀寫 `enable` 會 dispatch 到對應 callback。 |
-| `DEVICE_ATTR_RW(brightness)` | macro | `driver/myled_ctrl.c:201` | `myled_attrs[]` | 產生 brightness attribute | `brightness_show`、`brightness_store` | 使用者可讀寫 brightness register。 |
-| `DEVICE_ATTR_RW(color)` | macro | `driver/myled_ctrl.c:224` | `myled_attrs[]` | 產生 color attribute | `color_show`、`color_store` | 使用者可讀寫 color register。 |
-| `DEVICE_ATTR_RW(blink)` | macro | `driver/myled_ctrl.c:250` | `myled_attrs[]` | 產生 blink attribute | `blink_show`、`blink_store` | 使用者可切換 CTRL blink bit。 |
-| `DEVICE_ATTR_RO(status)` | macro | `driver/myled_ctrl.c:260` | `myled_attrs[]` | 產生 status read-only attribute | `status_show` | 使用者只能讀 status flags。 |
-| `DEVICE_ATTR_RO(info)` | macro | `driver/myled_ctrl.c:282` | `myled_attrs[]` | 產生 info read-only attribute | `info_show` | 輸出 version、num_leds、simulated、ctrl、brightness、color。 |
-| `myled_attrs[]` | dispatch table | `driver/myled_ctrl.c:284` | `myled_attr_group` | 聚合所有 attributes | `dev_attr_*` | 決定 sysfs group 暴露哪些 files。 |
-| `myled_attr_group` | sysfs group | `driver/myled_ctrl.c:294` | `sysfs_create_group` / `sysfs_remove_group` | 建立 named group `.name = "myled"` | `myled_attrs` | 決定 sysfs path 會是 device kobject 底下的 `myled/`。 |
-
-#### Execution Path / Register Access
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 / 呼叫來源 | 用途 | 關聯 struct/data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|
-| `myled_reg_read` | helper | `driver/myled_ctrl.c:35` | show callbacks、`myled_hw_init`、bit helpers、`info_show` | 依 `priv->simulated` 選擇讀 `sim_regs[off/4]` 或 `readl(base + off)` | `priv->lock`、`priv->base`、`priv->sim_regs` | 統一 read path，並以 spinlock 保護。 |
-| `myled_reg_write` | helper | `driver/myled_ctrl.c:49` | store callbacks、`myled_hw_init`、`myled_hw_shutdown`、bit helpers | 依 `priv->simulated` 選擇寫 shadow array 或 MMIO | 同上 | 統一 write path。 |
-| `myled_reg_set_bits` | helper | `driver/myled_ctrl.c:60` | `myled_hw_init`、`enable_store`、`blink_store`、`myled_resume` | read-modify-write 設定 bits | `MYLED_REG_CTRL`、mask | 不是單一 lock 覆蓋整個 RMW；讀與寫各自 lock。 |
-| `myled_reg_clr_bits` | helper | `driver/myled_ctrl.c:65` | `myled_hw_shutdown`、`enable_store`、`blink_store`、`myled_suspend` | read-modify-write 清除 bits | `MYLED_REG_CTRL`、mask | 同上，RMW 期間可能被其他 writer 交錯。 |
-
-#### Lifecycle / Cleanup
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 / 呼叫來源 | 用途 | 關聯 struct/data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|
-| `myled_hw_shutdown` | lifecycle helper | `driver/myled_ctrl.c:139` | `myled_remove`、`sysfs_create_group` 失敗 path | 清除 enable/blink/pwm 並 brightness 寫 0 | CTRL / BRIGHTNESS registers | 將 controller 關閉，作為 cleanup 的 device state 收尾。 |
-| `myled_remove` | callback | `driver/myled_ctrl.c:380` | platform driver remove/unbind | disable runtime PM、移除 sysfs group、shutdown HW | `priv` from `platform_get_drvdata` | cleanup chain 的主要入口。 |
-| `sysfs_remove_group` | cleanup API | 呼叫於 `driver/myled_ctrl.c:387` | `myled_remove` | 移除 `myled/` sysfs files | `myled_attr_group` | 防止 remove 後 userspace 繼續透過 sysfs 進入 callbacks。 |
-| `pm_runtime_disable` | PM cleanup API | 呼叫於 `driver/myled_ctrl.c:386` | `myled_remove` | 關閉 runtime PM | `struct device` | 與 probe 的 `pm_runtime_enable` 對應。 |
-
-#### Logging / Debug / Error Handling
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 / 呼叫來源 | 用途 | 對 execution flow 的影響 |
-|---|---|---|---|---|---|
-| `dev_info` | logging API | 多處 | probe/init/remove/sysfs success path | 記錄 probe、MMIO region、simulated mode、init/remove 狀態 | 不改變 flow。 |
-| `dev_warn` | logging API | `driver/myled_ctrl.c:113`、`321`、`333`、`342` | version mismatch、DT property 缺失、MEM resource 缺失、ioremap 失敗 | 記錄 non-fatal fallback | 對 `num-leds`、resource mapping、simulated mode 有 fallback 行為。 |
-| `dev_err` | logging API | `driver/myled_ctrl.c:359`、`366` | `myled_hw_init` 或 `sysfs_create_group` 失敗 | 記錄 fatal probe error | `myled_hw_init` 目前不會回傳錯誤；`sysfs_create_group` 失敗會中止 probe。 |
-| `kstrtobool` | parsing API | `enable_store`、`blink_store` | sysfs write | parse bool | parse 失敗回傳錯誤，不改 register。 |
-| `kstrtou32` | parsing API | `brightness_store`、`color_store` | sysfs write | parse decimal/hex u32 | parse 失敗回傳錯誤，不改 register。 |
-| `-EINVAL` | error code | `brightness_store` | sysfs write brightness | brightness > 255 時拒絕 | 防止超過 `MYLED_MAX_BRIGHTNESS`。 |
-
----
-
-### 4. Call Graph
-
-#### Initialization Chain
-
-```text
-scripts/05_run_qemu.sh
-  -> qemu-system-aarch64 -machine virt -kernel Image -dtb dts/qemu-virt-myled.dtb -initrd rootfs/initramfs.cpio.gz
-  -> kernel uses DTB containing myled-controller@0d000000
-  -> /init from initramfs
-  -> insmod /myled_ctrl.ko
-  -> module_platform_driver(myled_driver)
-  -> platform_driver_register(&myled_driver)
-  -> platform bus / OF match
-       myled_of_match[]:
-         "myvendor,myled-v1"
-         "myvendor,myled"
-       DTS:
-         compatible = "myvendor,myled-v1"
-  -> myled_probe(pdev)
-       -> devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL)
-       -> priv->dev = dev
-       -> spin_lock_init(&priv->lock)
-       -> of_property_read_u32(dev->of_node, "num-leds", &priv->num_leds)
-       -> of_property_read_string(dev->of_node, "label", &label)
-       -> platform_get_resource(pdev, IORESOURCE_MEM, 0)
-       -> devm_ioremap_resource(dev, res) or priv->simulated = true
-       -> platform_set_drvdata(pdev, priv)
-       -> dev_set_drvdata(dev, priv)
-       -> myled_hw_init(priv)
-       -> sysfs_create_group(&dev->kobj, &myled_attr_group)
-       -> pm_runtime_enable(dev)
+```dts
+#address-cells = <2>;
+#size-cells = <2>;
 ```
 
-#### Runtime Chain: sysfs Read
+因此 `reg` 使用四個 cell 表示一組 64-bit address 與 64-bit size：
 
 ```text
-cat /sys/bus/platform/devices/<DEV>/myled/brightness
-  -> sysfs dispatch via dev_attr_brightness
-  -> brightness_show(dev, attr, buf)
-  -> dev_get_drvdata(dev)
-  -> myled_reg_read(priv, MYLED_REG_BRIGHTNESS)
-       -> spin_lock_irqsave(&priv->lock, flags)
-       -> if priv->simulated:
-            val = priv->sim_regs[MYLED_REG_BRIGHTNESS / 4]
-          else:
-            val = readl(priv->base + MYLED_REG_BRIGHTNESS)
-       -> spin_unlock_irqrestore(&priv->lock, flags)
-  -> sysfs_emit(buf, "%u\n", val)
+<address-high address-low size-high size-low>
+<0x0          0x0d000000 0x0       0x1000>
 ```
 
-#### Runtime Chain: sysfs Write
+換算後：
 
 ```text
-echo 200 > /sys/bus/platform/devices/<DEV>/myled/brightness
-  -> sysfs dispatch via dev_attr_brightness
-  -> brightness_store(dev, attr, buf, count)
-  -> dev_get_drvdata(dev)
-  -> kstrtou32(buf, 10, &val)
-  -> if val > MYLED_MAX_BRIGHTNESS: return -EINVAL
-  -> myled_reg_write(priv, MYLED_REG_BRIGHTNESS, val)
-       -> spin_lock_irqsave(&priv->lock, flags)
-       -> if priv->simulated:
-            priv->sim_regs[MYLED_REG_BRIGHTNESS / 4] = val
-          else:
-            writel(val, priv->base + MYLED_REG_BRIGHTNESS)
-       -> spin_unlock_irqrestore(&priv->lock, flags)
-  -> return count
+base = 0x000000000d000000
+size = 0x0000000000001000
+end  = 0x000000000d000fff
 ```
 
-#### Cleanup Chain
+### MMIO Collision Check
+
+`dts/patch_dtb.sh` 會在合併 overlay 前掃描 QEMU base DTB 的 `reg`。若 `myled` 目標範圍與既有 device 重疊，腳本會停止。
+
+判斷邏輯：
 
 ```text
-module unload / driver unbind
-  -> platform driver core
-  -> myled_remove(pdev)
-       -> dev = &pdev->dev
-       -> priv = platform_get_drvdata(pdev)
-       -> pm_runtime_disable(dev)
-       -> sysfs_remove_group(&dev->kobj, &myled_attr_group)
-       -> myled_hw_shutdown(priv)
-            -> myled_reg_clr_bits(priv, MYLED_REG_CTRL,
-                                  MYLED_CTRL_ENABLE | MYLED_CTRL_BLINK | MYLED_CTRL_PWM_AUTO)
-            -> myled_reg_write(priv, MYLED_REG_BRIGHTNESS, 0)
-       -> devm resources released by driver core after device teardown
+target_start <= existing_end && target_end >= existing_start
 ```
 
-#### Callback Chain
+這是標準 interval overlap 檢查。
+
+重要限制：
+
+- 腳本檢查實際 device 的 `reg`。
+- 不把 bus `ranges` 當成 device 已佔用範圍。
+
+原因是 `ranges` 描述 bus address translation window，不等於某一個 driver 已經 claim 的 MMIO resource。
+
+### MMIO 位址保護流程圖
+
+```mermaid
+flowchart TD
+    START["目標位址<br/>0x0d000000-0x0d000fff"] --> DUMP["QEMU dump base DTB"]
+    DUMP --> SCAN["dtc 轉 DTS<br/>掃描既有 device reg"]
+    SCAN --> OVERLAP{"和既有 reg overlap ?"}
+    OVERLAP -->|"yes"| STOP["停止合併 overlay<br/>印出衝突 device"]
+    OVERLAP -->|"no"| MERGE["fdtoverlay 合併 myled node"]
+    MERGE --> BOOT["QEMU boot final DTB"]
+    BOOT --> PROBE["myled_probe()"]
+    PROBE --> CHECK{"resource start/size<br/>是否等於預期 ?"}
+    CHECK -->|"no"| FAIL["probe 回傳 -EINVAL"]
+    CHECK -->|"yes"| OK["建立 sysfs 並執行測試"]
+```
+
+這裡有兩層檢查：
+
+1. `dts/patch_dtb.sh` 在 build-time 檢查「會不會撞到 QEMU 既有 device」。
+2. `myled_probe()` 在 run-time 檢查「driver 實際拿到的 resource 是否仍是 `0x0d000000/0x1000`」。
+
+兩層都需要保留。第一層負責擋掉 address collision；第二層負責擋掉 DTS、driver 常數或測試腳本互相不一致。
+
+## 2A. Device Tree 工具與 Overlay 選擇依據
+
+這個專案沒有直接手改 QEMU 內建的整份 DTS，而是先 dump QEMU 產生的 base DTB，再用 overlay 合併 `myled` 節點。這樣做的重點是：base DTB 由實際 QEMU machine 產生，overlay 只負責加入本專案需要的 device。
+
+### Device Tree 工具鏈圖
+
+```mermaid
+flowchart TD
+    QEMU["qemu-system-aarch64<br/>-machine virt,dumpdtb=..."] --> BASE["qemu-virt-base.dtb"]
+    BASE --> DTC1["dtc -I dtb -O dts<br/>解析並檢查既有 reg"]
+    DTS["myled-fragment.dts"] --> DTC2["dtc -I dts -O dtb -@<br/>產生 myled-fragment.dtbo"]
+    BASE --> OVERLAY["fdtoverlay"]
+    DTC2 --> OVERLAY
+    OVERLAY --> FINAL["qemu-virt-myled.dtb"]
+    FINAL --> VERIFY["dtc -I dtb -O dts<br/>確認 myled-controller@0d000000"]
+```
+
+### `dtc`、`fdtoverlay`、直接改 DTS 怎麼選
+
+| 作法 / 工具 | 用途 | 優點 | 限制 | 本專案選擇 |
+|---|---|---|---|---|
+| `qemu -machine virt,dumpdtb=...` | 讓 QEMU 輸出它實際會提供給 kernel 的 base DTB。 | 不需要猜 QEMU virt machine 目前有哪些 device。 | 輸出是 DTB，需要再用 `dtc` 轉成人可讀 DTS。 | 使用。 |
+| `dtc -I dtb -O dts` | 把 DTB 反編譯成 DTS。 | 可掃描 `reg`，做位址重疊檢查。 | 反編譯結果適合檢查，不一定適合當手寫來源長期維護。 | 使用於檢查。 |
+| `dtc -I dts -O dtb -@` | 把 overlay DTS 編成 DTBO，並保留 overlay 需要的符號資訊。 | 可把小片段 overlay 獨立管理。 | DTS 寫錯時會在這步失敗。 | 使用。 |
+| `fdtoverlay` | 把 base DTB 和 DTBO 合併。 | 不必改整份 base DTS。 | overlay target 與格式要正確。 | 使用。 |
+| 直接手改整份 base DTS | 把 QEMU base DTS 反編譯後手動插入 node 再編回 DTB。 | 對初學者直覺。 | 容易把 QEMU 產生的其他內容一起改壞，也不容易重現。 | 不使用。 |
+
+### 為什麼用 Overlay
+
+本專案只需要新增一個 `myled-controller@0d000000` 節點，沒有必要維護整份 QEMU base DTS。Overlay 的好處是變更範圍小，檢查點清楚：
 
 ```text
-OF/platform callback:
-  myled_driver.probe  -> myled_probe
-  myled_driver.remove -> myled_remove
-
-PM callback:
-  myled_driver.driver.pm -> myled_pm_ops
-  SET_SYSTEM_SLEEP_PM_OPS(myled_suspend, myled_resume)
-  system suspend -> myled_suspend -> myled_reg_clr_bits(... ENABLE)
-  system resume  -> myled_resume  -> myled_reg_set_bits(... ENABLE)
-
-sysfs callback:
-  myled_attr_group.attrs -> dev_attr_enable.attr      -> enable_show / enable_store
-                          -> dev_attr_brightness.attr -> brightness_show / brightness_store
-                          -> dev_attr_color.attr      -> color_show / color_store
-                          -> dev_attr_blink.attr      -> blink_show / blink_store
-                          -> dev_attr_status.attr     -> status_show
-                          -> dev_attr_info.attr       -> info_show
+base DTB: QEMU 原本的硬體描述
+overlay: 只描述 myled-controller
+final DTB: base + myled
 ```
 
-#### Indirect Call Chain / Dispatch Table
+這樣如果 `myled` 出問題，範圍會集中在 overlay、位址檢查或 driver matching，不會和 QEMU base DTB 的其他內容混在一起。
 
-| Dispatch point | Table / function pointer | Target | Evidence |
-|---|---|---|---|
-| platform driver registration | `myled_driver.probe` | `myled_probe` | `driver/myled_ctrl.c:429-430` |
-| platform driver removal | `myled_driver.remove` | `myled_remove` | `driver/myled_ctrl.c:429-431` |
-| OF matching | `myled_driver.driver.of_match_table` | `myled_of_match` | `driver/myled_ctrl.c:435` |
-| PM system sleep | `myled_driver.driver.pm` | `myled_pm_ops` | `driver/myled_ctrl.c:436` |
-| PM operation table | `SET_SYSTEM_SLEEP_PM_OPS` | `myled_suspend` / `myled_resume` | `driver/myled_ctrl.c:412-413` |
-| sysfs group | `myled_attr_group.attrs` | `myled_attrs[]` | `driver/myled_ctrl.c:294-296` |
-| sysfs attribute | `DEVICE_ATTR_RW/RO` generated callbacks | `*_show` / `*_store` | `driver/myled_ctrl.c:176`、`201`、`224`、`250`、`260`、`282` |
+## 3. Driver Constants and Register Map
 
----
+### Direct Observation
 
-### 5. Struct / Resource Tracing
+`driver/myled_ctrl.h` 定義：
 
-#### `struct myled_priv`
+| Macro | 值 | 說明 |
+|---|---:|---|
+| `MYLED_REG_CTRL` | `0x00` | 控制暫存器 offset。 |
+| `MYLED_REG_BRIGHTNESS` | `0x04` | 亮度暫存器 offset。 |
+| `MYLED_REG_COLOR` | `0x08` | RGB 顏色暫存器 offset。 |
+| `MYLED_REG_STATUS` | `0x0c` | 狀態暫存器 offset。 |
+| `MYLED_REG_VERSION` | `0x10` | 版本暫存器 offset。 |
+| `MYLED_MMIO_BASE` | `0x0d000000ULL` | 預期 MMIO base。 |
+| `MYLED_MMIO_SIZE` | `0x1000U` | 預期 MMIO size。 |
+| `MYLED_MAX_BRIGHTNESS` | `255U` | 亮度上限。 |
+| `MYLED_HW_VERSION` | `0xAB01U` | 版本暫存器預期值。 |
+| `MYLED_REG_SIZE` | `0x14U` | Driver 目前會使用的 register block 大小。 |
+| `MYLED_SIM_REG_COUNT` | `8` | simulated register array 大小。 |
 
-##### # Direct Observation
+### Bit Fields
 
-定義於 `driver/myled_ctrl.h:39-46`：
+| Register | Bit macro | Bit | 說明 |
+|---|---|---:|---|
+| `CTRL` | `MYLED_CTRL_ENABLE` | 0 | 啟用 controller。 |
+| `CTRL` | `MYLED_CTRL_BLINK` | 1 | 啟用 blink。 |
+| `CTRL` | `MYLED_CTRL_PWM_AUTO` | 2 | 保留的 PWM auto bit。 |
+| `STATUS` | `MYLED_STATUS_READY` | 0 | controller ready。 |
+| `STATUS` | `MYLED_STATUS_FAULT` | 1 | fault 狀態。 |
+
+### Register Access Model
+
+```mermaid
+flowchart TD
+    SYSFS["sysfs callback"] --> HELPER["myled_reg_read/write/update_bits"]
+    HELPER --> VALIDATE["myled_validate_reg_access"]
+    VALIDATE --> MODE{"priv->simulated ?"}
+    MODE -->|"yes"| SIM["priv->sim_regs[index]"]
+    MODE -->|"no"| MMIO["readl/writel(priv->base + off)"]
+```
+
+## 4. Main Data Structure
+
+### Direct Observation
+
+`struct myled_priv` 是每個 platform device 專用的 private data。
+
+| 欄位 | 型態 | 用途 |
+|---|---|---|
+| `base` | `void __iomem *` | 非 simulated mode 的 MMIO virtual base。 |
+| `mmio_size` | `resource_size_t` | DT `reg` 轉換後的 resource size。 |
+| `dev` | `struct device *` | 對應 Linux device，用於 log 與 OF property 存取。 |
+| `num_leds` | `u32` | 從 DT `num-leds` 讀到的 LED 數量。 |
+| `simulated` | `bool` | 是否使用 shadow register bank。 |
+| `sim_regs` | `u32[]` | simulated mode 的 register array。 |
+| `lock` | `spinlock_t` | 保護 register read/write/update。 |
+
+### Ownership
+
+```text
+platform_device
+  -> struct device
+      -> drvdata points to struct myled_priv
+```
+
+Driver 在 `probe()` 中呼叫：
 
 ```c
-struct myled_priv {
-  void __iomem* base;
-  struct device* dev;
-  u32 num_leds;
-  bool simulated;
-  u32 sim_regs[MYLED_SIM_REG_COUNT];
-  spinlock_t lock;
+platform_set_drvdata(pdev, priv);
+dev_set_drvdata(dev, priv);
+```
+
+sysfs callback 再用：
+
+```c
+dev_get_drvdata(dev);
+```
+
+取回同一份 `priv`。
+
+## 5. Driver Registration API
+
+### Direct Observation
+
+| API / Macro | 類型 | 位置 | 功能 |
+|---|---|---|---|
+| `module_platform_driver(myled_driver)` | module helper macro | `driver/myled_ctrl.c` | 產生 module init/exit glue，註冊 platform driver。 |
+| `struct platform_driver myled_driver` | dispatch table | `driver/myled_ctrl.c` | 指定 `.probe`、`.remove`、`.driver.name`、`.of_match_table`、`.pm`。 |
+| `struct of_device_id myled_of_match[]` | OF match table | `driver/myled_ctrl.c` | 宣告支援的 `compatible` 字串。 |
+| `MODULE_DEVICE_TABLE(of, myled_of_match)` | module metadata | `driver/myled_ctrl.c` | 匯出 OF module alias metadata。 |
+| `MODULE_AUTHOR` | metadata | `driver/myled_ctrl.c` | module 作者資訊。 |
+| `MODULE_DESCRIPTION` | metadata | `driver/myled_ctrl.c` | module 描述。 |
+| `MODULE_LICENSE` | metadata | `driver/myled_ctrl.c` | license。 |
+| `MODULE_VERSION` | metadata | `driver/myled_ctrl.c` | module 版本。 |
+
+### Registration Flow
+
+```text
+insmod /myled_ctrl.ko
+  -> module_platform_driver generated init
+  -> platform_driver_register(&myled_driver)
+  -> platform bus compares OF compatible
+  -> myled_probe(pdev)
+```
+
+### `module_platform_driver()` 與手寫 `module_init()` / `module_exit()` 怎麼選
+
+| 作法 | 寫法概念 | 適合情境 | 本專案選擇 |
+|---|---|---|---|
+| `module_platform_driver(myled_driver)` | macro 自動產生 init/exit，內容就是註冊與反註冊 platform driver。 | module 載入時只需要註冊一個 `platform_driver`。 | 本專案使用。 |
+| `module_init()` + `module_exit()` | 自己寫 init/exit function。 | module 載入時還要做額外初始化，例如註冊多種 bus driver、配置全域資源。 | 本專案不需要。 |
+
+本專案選 `module_platform_driver()` 的原因很單純：module 載入時只有一件事，就是把 `myled_driver` 註冊給 platform bus。若手寫 `module_init()`，程式碼會變長，但不會讓流程更清楚。
+
+概念上它等同於：
+
+```text
+module init:
+  platform_driver_register(&myled_driver)
+
+module exit:
+  platform_driver_unregister(&myled_driver)
+```
+
+## 5A. Driver Matching API 教學與選擇依據
+
+Platform driver 的配對方式不只一種。這個專案使用 Device Tree 的 `compatible`，但要理解為什麼這樣選，需要把幾種常見配對方式放在一起看。
+
+### Device 與 Driver 配對流程圖
+
+```mermaid
+flowchart TD
+    DT["DT node<br/>myled-controller@0d000000"] --> COMP["compatible = myvendor,myled-v1"]
+    COMP --> PDEV["kernel 建立 platform_device"]
+    PDRV["myled_driver<br/>of_match_table"] --> BUS["platform bus"]
+    PDEV --> BUS
+    BUS --> MATCH{"compatible match ?"}
+    MATCH -->|"yes"| PROBE["call myled_probe()"]
+    MATCH -->|"no"| IDLE["driver 不處理此 device"]
+```
+
+### `of_match_table`、`id_table`、driver `.name` 怎麼選
+
+| 配對方式 | 主要欄位 | 適合情境 | 優點 | 限制 | 本專案選擇 |
+|---|---|---|---|---|---|
+| Device Tree match | `.driver.of_match_table` + `compatible` | 由 DTB 描述硬體的 ARM/SoC 平台。 | 硬體資訊留在 DTS，driver 不需要寫死 board 細節。 | 需要有正確 DT node。 | 使用。 |
+| Platform ID match | `.id_table` + `platform_device_id` | 非 DT 平台，或舊式 board code 建立 platform device。 | 可支援沒有 DT 的平台。 | 本專案 device 由 DTS overlay 建立，不需要。 | 不使用。 |
+| Driver name match | `.driver.name` | 非常簡單或舊式 platform device 名稱配對。 | 最少資料。 | 容易和硬體版本、vendor 資訊混在一起，不利於描述硬體差異。 | 不依賴。 |
+
+選擇依據：
+
+- 本專案的硬體來源是 `dts/myled-fragment.dts`，所以用 `compatible` 最直接。
+- `compatible = "myvendor,myled-v1"` 可以表達 vendor 與硬體版本，比只靠 `.driver.name = "myled_ctrl"` 清楚。
+- 未來如果硬體有 v2，可以在 `of_match_table` 加 `"myvendor,myled-v2"`，再依 match data 做差異處理。
+
+### `MODULE_DEVICE_TABLE()` 的作用
+
+`MODULE_DEVICE_TABLE(of, myled_of_match)` 不是用來執行配對的主邏輯；真正的配對由 driver core 讀 `.of_match_table` 完成。這個 macro 的作用是把 match table 資訊輸出到 module metadata。
+
+| 寫法 | 結果 |
+|---|---|
+| 有 `MODULE_DEVICE_TABLE(of, ...)` | module 會帶 OF alias metadata，外部 module loader 比較容易根據 device alias 找到模組。 |
+| 沒有 `MODULE_DEVICE_TABLE(of, ...)` | 手動 `insmod` 仍可能成功，但少了可供自動載入使用的 alias metadata。 |
+
+本專案 rootfs 是手動 `insmod /myled_ctrl.ko`，所以即使沒有自動載入機制也能跑。不過保留 `MODULE_DEVICE_TABLE()` 是比較完整的 driver 寫法，也讓 module metadata 和 OF match table 保持一致。
+
+## 6. Probe Path API Inventory
+
+### Direct Observation
+
+| API | 類型 | 在本專案中的用途 | 錯誤處理 |
+|---|---|---|---|
+| `devm_kzalloc()` | managed allocation | 配置並清零 `struct myled_priv`。 | 失敗回傳 `-ENOMEM`，`probe()` 中止。 |
+| `spin_lock_init()` | lock init | 初始化 `priv->lock`。 | 無回傳值。 |
+| `of_property_read_u32()` | OF property read | 讀取 `num-leds` 與 `default-brightness`。 | `num-leds` 缺失時預設 1；`default-brightness` 缺失時預設 128。 |
+| `of_property_read_string()` | OF property read | 讀取 `label` 供 log 使用。 | 缺失不影響 probe。 |
+| `of_property_read_bool()` | OF property read | 讀取 `myvendor,simulated`。 | boolean property，不存在即 false。 |
+| `platform_get_resource()` | platform resource | 取得 memory resource。 | 缺失回傳 `-ENODEV`。 |
+| `resource_size()` | resource helper | 計算 MMIO size。 | 無直接錯誤碼。 |
+| `devm_ioremap_resource()` | managed MMIO map | 非 simulated mode 時映射 MMIO。 | 失敗時改用 simulated mode。 |
+| `platform_set_drvdata()` | state binding | 將 `priv` 綁到 `pdev`。 | 無回傳值。 |
+| `dev_set_drvdata()` | state binding | 將 `priv` 綁到 `dev`。 | 無回傳值。 |
+| `sysfs_create_group()` | sysfs registration | 建立 `myled/` attribute group。 | 失敗會呼叫 `myled_hw_shutdown()` 並回傳錯誤。 |
+| `pm_runtime_enable()` | PM framework | 啟用 runtime PM 狀態。 | 無回傳值。 |
+
+### Probe Error Policy
+
+本專案的 `probe()` 對錯誤分成兩類：
+
+| 類型 | 例子 | 處理方式 |
+|---|---|---|
+| Fatal error | 缺少 MEM resource、MMIO base/size 不符合預期、sysfs 建立失敗 | 直接回傳錯誤，driver 不完成 bind。 |
+| Non-fatal fallback | `num-leds` 缺失、`default-brightness` 缺失、非 simulated mode ioremap 失敗 | 使用預設值或切換 simulated mode。 |
+
+## 6A. Probe Path API 教學與選擇依據
+
+`probe()` 是 driver 最重要的初始化入口。可以把它想成「kernel 已經找到可能相容的 device，現在 driver 要確認資源能不能用，並把自己的狀態建立起來」。
+
+### Probe 重點流程圖
+
+```mermaid
+flowchart TD
+    MATCH["OF compatible match<br/>myvendor,myled-v1"] --> PROBE["myled_probe(pdev)"]
+    PROBE --> ALLOC["devm_kzalloc<br/>配置 struct myled_priv"]
+    ALLOC --> DT["of_property_read_*<br/>讀 num-leds / label / simulated"]
+    DT --> RES["platform_get_resource<br/>取得 IORESOURCE_MEM"]
+    RES --> CHECK["檢查 base=0x0d000000<br/>size=0x1000"]
+    CHECK --> MODE{"myvendor,simulated ?"}
+    MODE -->|"yes"| SIM["使用 sim_regs[]<br/>不做 ioremap"]
+    MODE -->|"no"| MAP["devm_ioremap_resource<br/>映射 MMIO"]
+    SIM --> DRVDATA["platform_set_drvdata<br/>dev_set_drvdata"]
+    MAP --> DRVDATA
+    DRVDATA --> HW["myled_hw_init"]
+    HW --> SYSFS["sysfs_create_group"]
+    SYSFS --> OK["probe success"]
+```
+
+### `devm_kzalloc()`、`kzalloc()`、`kmalloc()` 怎麼選
+
+| API | 會清零 | 生命週期 | 適合情境 | 本專案是否適合 |
+|---|---|---|---|---|
+| `kmalloc()` | 否 | 手動 `kfree()` | 需要自己初始化每個欄位，或資料不需要清零。 | 不優先，因為 `struct myled_priv` 有 bool、指標、register array，清零比較安全。 |
+| `kzalloc()` | 是 | 手動 `kfree()` | 一般 kernel 配置，需要自己控制釋放時機。 | 可用，但 `probe()` 失敗路徑要自己清。 |
+| `devm_kzalloc()` | 是 | 跟著 `struct device` | driver private data、resource 與 device 生命週期一致。 | 本專案選它，因為 `priv` 本來就屬於這個 platform device。 |
+
+選擇依據：
+
+- `struct myled_priv` 的生命週期和 device 相同。
+- `probe()` 中途可能因為 resource、sysfs、初始化失敗而返回。
+- 用 `devm_kzalloc()` 可以減少「某個錯誤分支忘記 `kfree()`」的風險。
+
+### `platform_get_resource()` 與相關 API
+
+| API | 取得的資源 | 常見用途 | 本專案選擇原因 |
+|---|---|---|---|
+| `platform_get_resource(pdev, IORESOURCE_MEM, 0)` | MMIO memory resource | 從 DT `reg` 取得硬體位址範圍。 | 需要先拿到 `res->start` 與 `resource_size(res)`，確認固定位址沒有漂移。 |
+| `platform_get_irq(pdev, 0)` | IRQ number | 從 DT `interrupts` 取得中斷號。 | 本專案目前沒有 IRQ，所以不使用。 |
+| `platform_get_resource_byname()` | 有名稱的 resource | DTS 或 platform data 有多組 resource，需要靠名字區分。 | 本專案只有一組 MEM resource，不需要用 name。 |
+
+選擇依據：
+
+- 本專案最重視的是 `reg` 是否真的等於 `0x0d000000/0x1000`。
+- `platform_get_resource()` 會先把 resource 取出來，driver 才能在映射前做 base/size 檢查。
+- 若未來有多段 MMIO，例如 `ctrl` 與 `pwm` 分開，才比較需要 `platform_get_resource_byname()`。
+
+### `devm_ioremap_resource()`、`devm_platform_ioremap_resource()`、`ioremap()` 怎麼選
+
+| API | 做了什麼 | 優點 | 限制或成本 | 本專案選擇 |
+|---|---|---|---|---|
+| `ioremap()` | 只把 physical address 映射成 kernel virtual address | 彈性高。 | 需要自己 request region、檢查錯誤、在清理時 `iounmap()`。 | 不選，因為 demo driver 不需要手動管理這些細節。 |
+| `devm_ioremap_resource()` | 檢查 resource、request region、ioremap，並用 devm 管理 | 適合 driver probe path，錯誤處理較集中。 | 需要先自己取得 `struct resource *`。 | 本專案選它，因為要先檢查 base/size，且只在非 simulated mode 使用。 |
+| `devm_platform_ioremap_resource()` | 取 resource 與 ioremap 合在一起 | 程式碼較短。 | 不方便在 ioremap 前檢查 `res->start` 與 size，也不適合本專案 simulated mode 的分支。 | 本專案不選，因為位址驗證是必要步驟。 |
+
+本專案的順序故意拆開：
+
+```text
+platform_get_resource()
+  -> resource_size()
+  -> 檢查 start/size
+  -> simulated ? skip ioremap : devm_ioremap_resource()
+```
+
+這樣寫比較長，但錯誤比較早被擋下來，也比較容易從 log 看出是哪一段出問題。
+
+### `of_property_read_*()` 與 `device_property_read_*()` 怎麼選
+
+| API | 面向 | 適合情境 | 本專案選擇 |
+|---|---|---|---|
+| `of_property_read_u32/string/bool()` | Device Tree / Open Firmware | driver 明確依賴 DT `of_node`。 | 本專案使用，因為 device 由 DTS overlay 建立。 |
+| `device_property_read_u32/string/bool()` | Firmware property abstraction | 同一個 driver 想同時支援 OF、ACPI 或 software node。 | 本專案暫時不需要，因為目標環境固定是 QEMU + DTB。 |
+
+選擇依據：
+
+- 本專案的硬體描述來源就是 `dts/myled-fragment.dts`。
+- `compatible`、`reg`、`myvendor,simulated` 都是 Device Tree 語境。
+- 使用 `of_property_read_*()` 可讓讀者直接對回 DTS 屬性。
+
+### `platform_set_drvdata()`、`dev_set_drvdata()`、`dev_get_drvdata()` 怎麼看
+
+這組 API 的核心概念是：不要用全域變數記錄 device 狀態，而是把 `priv` 掛在 device 上。
+
+```mermaid
+flowchart LR
+    PDEV["struct platform_device"] --> DEV["struct device"]
+    PRIV["struct myled_priv"] --> PDEV
+    PRIV --> DEV
+    SYSFS["sysfs callback<br/>拿到 struct device"] --> GET["dev_get_drvdata(dev)"]
+    GET --> PRIV
+    REMOVE["myled_remove<br/>拿到 struct platform_device"] --> PGET["platform_get_drvdata(pdev)"]
+    PGET --> PRIV
+```
+
+| API | 使用位置 | 原因 |
+|---|---|---|
+| `platform_set_drvdata(pdev, priv)` | `probe()` | 讓 `remove()` 可以用 `platform_get_drvdata()` 找回 `priv`。 |
+| `dev_set_drvdata(dev, priv)` | `probe()` | 讓 sysfs callback 可以用 `dev_get_drvdata()` 找回 `priv`。 |
+| `dev_get_drvdata(dev)` | sysfs show/store | sysfs callback 參數是 `struct device *`，不是 `struct platform_device *`。 |
+
+## 7. Register Helper API
+
+### Direct Observation
+
+| Helper | 功能 | 防呆 |
+|---|---|---|
+| `myled_validate_reg_access()` | 檢查 register offset 是否可存取。 | 檢查 `priv`、32-bit 對齊、register block 範圍、sim array 範圍、MMIO mapping 與 mapped size。 |
+| `myled_reg_read()` | 讀 register。 | 先 validate，再以 spinlock 保護讀取。 |
+| `myled_reg_write()` | 寫 register。 | 先 validate，再以 spinlock 保護寫入。 |
+| `myled_reg_update_bits()` | 在同一個 lock 內完成 read-modify-write。 | 避免 `enable` 與 `blink` 等 bit 操作互相覆蓋。 |
+| `myled_reg_set_bits()` | 設定 bit。 | 呼叫 `myled_reg_update_bits(..., true)`。 |
+| `myled_reg_clr_bits()` | 清除 bit。 | 呼叫 `myled_reg_update_bits(..., false)`。 |
+
+### Why `myled_reg_update_bits()` Matters
+
+錯誤範例概念：
+
+```text
+Thread A: read CTRL = 0
+Thread B: read CTRL = 0
+Thread A: set ENABLE, write CTRL = 1
+Thread B: set BLINK,  write CTRL = 2
+```
+
+最後 `ENABLE` 被蓋掉，這就是 lost update。
+
+修正後：
+
+```text
+lock
+  read CTRL
+  modify bit
+  write CTRL
+unlock
+```
+
+因此同一時間只有一個 writer 可以完成整個 read-modify-write。
+
+### `readl()` / `writel()`、`ioread32()` / `iowrite32()`、直接解參考怎麼選
+
+| 作法 | 說明 | 優點 | 風險 | 本專案選擇 |
+|---|---|---|---|---|
+| 直接讀寫指標，例如 `*(u32 *)addr` | 把 MMIO 當一般記憶體 | 看起來簡單 | 不符合 kernel MMIO 存取習慣，可能缺少必要順序保證，也容易被編譯器最佳化影響。 | 不使用。 |
+| `readl()` / `writel()` | 常見 MMIO 32-bit register accessor | 語意明確，適合 `void __iomem *` base + offset。 | 需要先正確 ioremap。 | 本專案非 simulated mode 使用這組。 |
+| `ioread32()` / `iowrite32()` | 較通用的 I/O accessor | 可用於更抽象的 I/O memory 或 port I/O 情境。 | 對本專案單純 MMIO register block 來說沒有明顯必要。 | 不使用。 |
+
+選擇依據：
+
+- `priv->base` 型態是 `void __iomem *`，代表它不是一般 RAM 指標。
+- 本專案 register 都是 32-bit offset，因此 `readl()` / `writel()` 語意剛好對應。
+- simulated mode 不呼叫 `readl()` / `writel()`，而是讀寫 `sim_regs[]`，避免碰 QEMU 中不存在的硬體。
+
+### Register Update 功能圖
+
+```mermaid
+sequenceDiagram
+    participant User as User shell
+    participant Sysfs as sysfs store callback
+    participant Helper as myled_reg_update_bits()
+    participant Lock as spinlock
+    participant Reg as CTRL register / sim_regs
+
+    User->>Sysfs: echo 1 > blink
+    Sysfs->>Sysfs: kstrtobool(buf, &blink)
+    Sysfs->>Helper: myled_reg_set_bits(CTRL, BLINK)
+    Helper->>Helper: validate offset
+    Helper->>Lock: spin_lock_irqsave()
+    Helper->>Reg: read current CTRL
+    Helper->>Reg: set BLINK bit
+    Helper->>Reg: write updated CTRL
+    Helper->>Lock: spin_unlock_irqrestore()
+    Sysfs-->>User: return count
+```
+
+## 8. sysfs API Inventory
+
+### Direct Observation
+
+| Attribute | Macro | 權限語意 | show/store | 對應 register |
+|---|---|---|---|---|
+| `enable` | `DEVICE_ATTR_RW(enable)` | read/write | `enable_show()` / `enable_store()` | `CTRL` bit 0 |
+| `brightness` | `DEVICE_ATTR_RW(brightness)` | read/write | `brightness_show()` / `brightness_store()` | `BRIGHTNESS` |
+| `color` | `DEVICE_ATTR_RW(color)` | read/write | `color_show()` / `color_store()` | `COLOR` |
+| `blink` | `DEVICE_ATTR_RW(blink)` | read/write | `blink_show()` / `blink_store()` | `CTRL` bit 1 |
+| `status` | `DEVICE_ATTR_RO(status)` | read only | `status_show()` | `STATUS` |
+| `info` | `DEVICE_ATTR_RO(info)` | read only | `info_show()` | 多個 register |
+
+`myled_attr_group` 設定：
+
+```c
+static const struct attribute_group myled_attr_group = {
+    .name = "myled",
+    .attrs = myled_attrs,
 };
 ```
 
-| 欄位 | 初始化 / 寫入位置 | 使用位置 | ownership / lifetime |
+因此 sysfs path 是：
+
+```text
+/sys/bus/platform/devices/<device-name>/myled/
+```
+
+在目前 QEMU 執行結果中，device name 是：
+
+```text
+d000000.myled-controller
+```
+
+完整 path：
+
+```text
+/sys/bus/platform/devices/d000000.myled-controller/myled/
+```
+
+### Input Parsing
+
+| Attribute | Parser | Base | 合法值 |
+|---|---|---:|---|
+| `enable` | `kstrtobool()` | boolean | `0/1`、`true/false` 等 kernel bool parser 支援格式。 |
+| `brightness` | `kstrtou32()` | 10 | `0..255`。 |
+| `color` | `kstrtou32()` | 16 | 十六進位，driver 只保留低 24 bits。 |
+| `blink` | `kstrtobool()` | boolean | `0/1`、`true/false` 等 kernel bool parser 支援格式。 |
+
+### Runtime Example
+
+```sh
+cd /sys/bus/platform/devices/d000000.myled-controller/myled
+
+echo 1 > enable
+cat enable
+
+echo 200 > brightness
+cat brightness
+
+echo ff3300 > color
+cat color
+
+echo 1 > blink
+cat blink
+
+cat status
+cat info
+```
+
+## 8A. sysfs API 教學與選擇依據
+
+sysfs 的設計重點是「一個檔案代表一個簡單屬性」。本專案的 `enable`、`brightness`、`color`、`blink`、`status`、`info` 都符合這個模型。
+
+### sysfs 寫入如何運作
+
+```mermaid
+flowchart TD
+    USER["echo 200 > brightness"] --> VFS["VFS / sysfs"]
+    VFS --> STORE["brightness_store(dev, attr, buf, count)"]
+    STORE --> GET["dev_get_drvdata(dev)"]
+    GET --> PARSE["kstrtou32(buf, 10, &val)"]
+    PARSE --> CHECK{"val <= 255 ?"}
+    CHECK -->|"no"| EINVAL["return -EINVAL"]
+    CHECK -->|"yes"| WRITE["myled_reg_write(BRIGHTNESS, val)"]
+    WRITE --> RET["return count"]
+```
+
+### `DEVICE_ATTR_RW()`、`DEVICE_ATTR_RO()`、`DEVICE_ATTR()` 怎麼選
+
+| Macro | 會產生什麼 | 適合情境 | 本專案使用 |
 |---|---|---|---|
-| `base` | `devm_ioremap_resource` 成功時寫入；失敗時設 `NULL` (`driver/myled_ctrl.c:340-344`) | `myled_reg_read/write` 非 simulated path | MMIO mapping 使用 devm 管理，lifetime 綁定 device。 |
-| `dev` | `priv->dev = dev` (`driver/myled_ctrl.c:316`) | `myled_hw_init`、`myled_hw_shutdown` logging 與 OF property read | back pointer，不擁有 `struct device`。 |
-| `num_leds` | `of_property_read_u32`，失敗 fallback 1 (`driver/myled_ctrl.c:320-324`) | `myled_hw_init` log、`info_show` output | value state，跟 `priv` 一起存在。 |
-| `simulated` | MEM resource 缺失、ioremap 失敗、VERSION mismatch 時設 true (`driver/myled_ctrl.c:333`、`344`、`116`) | register helpers、`info_show` | 決定 register backend。 |
-| `sim_regs[]` | `devm_kzalloc` 清零；simulated fallback 時寫 VERSION/STATUS (`driver/myled_ctrl.c:117-118`)；sysfs/register helpers 讀寫 | `myled_reg_read/write` simulated path | `priv` 內嵌 shadow register bank，不另行分配或釋放。 |
-| `lock` | `spin_lock_init` (`driver/myled_ctrl.c:317`) | `myled_reg_read/write` | 保護 register access，生命週期跟 `priv` 一致。 |
+| `DEVICE_ATTR_RW(name)` | `name_show()` 與 `name_store()`，read/write attribute | 檔名、show/store 函式名稱都照固定慣例。 | `enable`、`brightness`、`color`、`blink`。 |
+| `DEVICE_ATTR_RO(name)` | `name_show()`，read-only attribute | 狀態只允許讀，不允許 user space 寫。 | `status`、`info`。 |
+| `DEVICE_ATTR_WO(name)` | `name_store()`，write-only attribute | 觸發型控制，例如 reset、clear fault。 | 本專案沒有 write-only 行為。 |
+| `DEVICE_ATTR(name, mode, show, store)` | 自訂權限與函式名稱 | 需要特殊 permission 或函式不照命名慣例。 | 本專案不需要。 |
 
-#### Allocation / Init
+選擇依據：
+
+- 本專案 attribute 命名簡單，使用 `DEVICE_ATTR_RW()` / `DEVICE_ATTR_RO()` 可減少重複樣板。
+- `status` 與 `info` 是查詢資訊，不應讓 user space 寫入，所以用 RO。
+- `enable`、`brightness`、`color`、`blink` 是控制項，需要 readback，所以用 RW。
+
+### `sysfs_create_group()` 與 `device_create_file()` 怎麼選
+
+| API | 建立方式 | 優點 | 本專案選擇 |
+|---|---|---|---|
+| `device_create_file()` | 一次建立一個 attribute | 少量單一檔案時簡單。 | 不選，因為本專案有多個相關 attribute。 |
+| `sysfs_create_group()` | 一次建立一組 attribute，可放在子目錄 | `enable`、`brightness` 等檔案可以集中在 `myled/` 下。 | 本專案選它。 |
+| `debugfs_create_*()` | 建立 debugfs 節點 | 適合除錯，不適合穩定 user-facing 介面。 | 不選，因為測試腳本需要穩定 sysfs path。 |
+| `miscdevice` / char device | 建立 `/dev/...` 節點 | 適合大量資料、ioctl、poll、mmap 等需求。 | 不選，因為本專案只是簡單屬性控制。 |
+
+本專案使用 group 後，路徑會比較清楚：
 
 ```text
-myled_probe
-  -> devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL)
-  -> priv->dev = dev
-  -> spin_lock_init(&priv->lock)
-  -> parse DT into priv->num_leds
-  -> map resource into priv->base or set priv->simulated
-  -> platform_set_drvdata / dev_set_drvdata
-  -> myled_hw_init
+/sys/bus/platform/devices/d000000.myled-controller/myled/enable
+/sys/bus/platform/devices/d000000.myled-controller/myled/brightness
+/sys/bus/platform/devices/d000000.myled-controller/myled/color
 ```
 
-#### Ownership
+### `sysfs_emit()`、`sprintf()`、`snprintf()` 怎麼選
 
-- `priv`：由 `devm_kzalloc` 分配，driver 不手動 `kfree`。ownership 綁在 `struct device` 的 managed resource。
-- `base`：由 `devm_ioremap_resource` 建立 mapping，driver 不手動 `iounmap`。
-- `sim_regs`：內嵌於 `priv`，不存在獨立 ownership transfer。
-- sysfs group：由 `sysfs_create_group` 建立，必須由 `sysfs_remove_group` 移除；程式碼於 `myled_remove` 有對應移除。
-- module file：`scripts/03_build_driver.sh` 透過 `make install` 複製到 `rootfs/overlay/`，`scripts/04_build_rootfs.sh` 再放進 initramfs。這是 build artifact flow，不是 kernel runtime ownership。
+| API | 說明 | 在 sysfs show 中的選擇 |
+|---|---|---|
+| `sprintf()` | 不知道 buffer 剩餘大小，容易寫過頭。 | 不建議。 |
+| `snprintf()` | 可限制長度，但每個 sysfs show 都要自己管理 size。 | 可用，但不是最貼近 sysfs 的寫法。 |
+| `sysfs_emit()` | 專為 sysfs show callback 準備。 | 本專案使用。 |
 
-#### Lifetime / State Transition
+選擇依據：
 
-```text
-allocated zeroed priv
-  -> lock initialized
-  -> DT state loaded: num_leds
-  -> resource state:
-       base mapped, simulated=false
-       or base=NULL, simulated=true
-  -> drvdata bound
-  -> hardware state:
-       read VERSION
-       if mismatch: simulated=true, seed VERSION/STATUS
-       write brightness
-       set CTRL_ENABLE
-  -> sysfs visible
-  -> runtime sysfs reads/writes mutate CTRL/BRIGHTNESS/COLOR or read STATUS/VERSION
-  -> remove:
-       runtime PM disabled
-       sysfs hidden
-       CTRL enable/blink/pwm cleared
-       brightness zeroed
-  -> devm cleanup after device/driver teardown
+- sysfs show callback 收到的 `buf` 有固定語境。
+- `sysfs_emit()` 讓輸出格式更符合 sysfs 的預期。
+- `info_show()` 會輸出多行狀態，更適合用 `sysfs_emit()` 集中格式化。
+
+### `kstrtou32()`、`kstrtobool()` 與其他 parsing 寫法
+
+| API / 作法 | 適合輸入 | 優點 | 本專案使用 |
+|---|---|---|---|
+| `kstrtobool()` | boolean | 接受常見 bool 表示，錯誤時回傳錯誤碼。 | `enable`、`blink`。 |
+| `kstrtou32()` | unsigned 32-bit integer | 可指定 base，能檢查轉換錯誤。 | `brightness`、`color`。 |
+| `simple_strtoul()` | 舊式數字解析 | 寫法短。 | 不使用，錯誤處理不如 `kstrto*` 清楚。 |
+| `sscanf()` | 複雜格式 | 適合多欄位輸入。 | 不使用，本專案每個 attribute 只收單一值。 |
+
+選擇依據：
+
+- sysfs store callback 要能把錯誤回傳給 user space。
+- `brightness` 用 10 進位，因為人類操作亮度時通常輸入 `0..255`。
+- `color` 用 16 進位，因為 RGB 常用 `RRGGBB` 表示。
+
+## 9. Lifecycle and Cleanup
+
+### Direct Observation
+
+```mermaid
+flowchart TD
+    LOAD["insmod"] --> REGISTER["platform_driver_register"]
+    REGISTER --> PROBE["myled_probe"]
+    PROBE --> INIT["myled_hw_init"]
+    INIT --> SYSFS["sysfs_create_group"]
+    SYSFS --> RUN["runtime sysfs access"]
+    RUN --> REMOVE["myled_remove"]
+    REMOVE --> PMOFF["pm_runtime_disable"]
+    PMOFF --> SYSFSRM["sysfs_remove_group"]
+    SYSFSRM --> SHUTDOWN["myled_hw_shutdown"]
 ```
 
-#### Data Passing Path
+### `myled_hw_init()`
 
-```text
-DTS default-brightness
-  -> of_property_read_u32(priv->dev->of_node, "default-brightness", &brightness)
-  -> min(brightness, MYLED_MAX_BRIGHTNESS)
-  -> myled_reg_write(priv, MYLED_REG_BRIGHTNESS, brightness)
-  -> visible through brightness_show / info_show
+主要工作：
 
-User echo brightness
-  -> brightness_store
-  -> kstrtou32
-  -> range check <= MYLED_MAX_BRIGHTNESS
-  -> myled_reg_write
-  -> subsequent brightness_show sees new value
+1. simulated mode 時呼叫 `myled_seed_sim_regs()`。
+2. 讀取 `VERSION` register。
+3. 若非 simulated mode 讀不到正確版本，切換 simulated mode。
+4. 讀取 `default-brightness`，缺失時使用 128。
+5. 將 brightness clamp 到 `0..255`。
+6. 寫入 `BRIGHTNESS`。
+7. 設定 `CTRL.ENABLE`。
+8. 印出初始化完成 log。
+
+### `myled_hw_shutdown()`
+
+主要工作：
+
+1. 清除 `CTRL.ENABLE`、`CTRL.BLINK`、`CTRL.PWM_AUTO`。
+2. 將 `BRIGHTNESS` 寫成 0。
+3. 若 register helper 回傳錯誤，印出 warning。
+
+### `myled_remove()`
+
+清理順序：
+
+1. `pm_runtime_disable(dev)`。
+2. `sysfs_remove_group(&dev->kobj, &myled_attr_group)`。
+3. `myled_hw_shutdown(priv)`。
+
+## 10. Power Management API
+
+### Direct Observation
+
+| API / Macro | 用途 |
+|---|---|
+| `pm_runtime_enable()` | 在 `probe()` 成功後啟用 runtime PM framework 狀態。 |
+| `pm_runtime_disable()` | 在 `remove()` 時關閉 runtime PM framework 狀態。 |
+| `SET_SYSTEM_SLEEP_PM_OPS(myled_suspend, myled_resume)` | 註冊 system sleep suspend/resume callback。 |
+| `__maybe_unused` | 避免特定 kernel config 下 callback 未使用造成 warning。 |
+
+### System Sleep Callbacks
+
+| Callback | 行為 |
+|---|---|
+| `myled_suspend()` | 清除 `CTRL.ENABLE`。 |
+| `myled_resume()` | 設定 `CTRL.ENABLE`。 |
+
+### Conservative Inference
+
+目前程式碼沒有實作 `.runtime_suspend` 或 `.runtime_resume`。因此 `pm_runtime_enable()` 目前主要保留 runtime PM 的整合點，還不是完整的 runtime suspend/resume 實作。
+
+若未來要完整支援 runtime PM，應補上：
+
+- `runtime_suspend`
+- `runtime_resume`
+- usage count 管理
+- idle policy
+
+## 10A. PM API 教學與選擇依據
+
+Power Management 容易混淆，因為 Linux kernel 裡至少有兩種常見層級：system sleep 與 runtime PM。
+
+### System Sleep 與 Runtime PM 差異
+
+| 類型 | 觸發時機 | 常見 callback | 本專案狀態 |
+|---|---|---|---|
+| System sleep PM | 整個系統要 suspend/resume，例如休眠。 | `suspend()`、`resume()` | 有實作，透過 `SET_SYSTEM_SLEEP_PM_OPS()` 註冊。 |
+| Runtime PM | 單一 device 閒置時省電，不必等整台機器休眠。 | `runtime_suspend()`、`runtime_resume()`、`runtime_idle()` | 尚未實作 callback，目前只有 `pm_runtime_enable()` / `pm_runtime_disable()`。 |
+
+### PM 流程圖
+
+```mermaid
+flowchart TD
+    PROBE["probe success"] --> ENABLE["pm_runtime_enable(dev)"]
+    ENABLE --> NORMAL["device 可被 sysfs 操作"]
+    NORMAL --> SYS_SLEEP{"system suspend ?"}
+    SYS_SLEEP -->|"yes"| SUSPEND["myled_suspend()<br/>clear CTRL.ENABLE"]
+    SUSPEND --> RESUME["myled_resume()<br/>set CTRL.ENABLE"]
+    RESUME --> NORMAL
+    NORMAL --> REMOVE["remove()"]
+    REMOVE --> DISABLE["pm_runtime_disable(dev)"]
 ```
 
-#### Callback Binding
+### `SET_SYSTEM_SLEEP_PM_OPS()` 與手寫 `dev_pm_ops` 怎麼看
 
-- `platform_set_drvdata(pdev, priv)` 讓 `myled_remove` 使用 `platform_get_drvdata(pdev)` 取得同一個 `priv`。
-- `dev_set_drvdata(dev, priv)` 讓 sysfs show/store 與 PM callbacks 使用 `dev_get_drvdata(dev)` 取得同一個 `priv`。
-- 這兩個 binding 在 `myled_hw_init` 與 `sysfs_create_group` 前完成；source comment 也指出 sysfs callbacks 需要它。
+| 作法 | 說明 | 適合情境 | 本專案選擇 |
+|---|---|---|---|
+| `SET_SYSTEM_SLEEP_PM_OPS(suspend, resume)` | 用 macro 填入 system sleep callback。 | 只需要 system suspend/resume。 | 本專案使用。 |
+| 手動填 `.suspend` / `.resume` / `.freeze` 等欄位 | 可細分更多 sleep state。 | 需要支援 freeze、thaw、poweroff、restore 等進階狀態。 | 本專案不需要。 |
+| runtime PM callbacks | `.runtime_suspend` / `.runtime_resume` | device 閒置時自動省電。 | 尚未實作。 |
 
----
+選擇依據：
 
-### 6. Execution Trace
+- 本專案目前的 PM 行為很小：suspend 時關閉 enable bit，resume 時打開。
+- 這個行為符合 system sleep callback，不需要更複雜的 sleep state。
+- runtime PM 要處理 usage count 與 idle policy；目前 sysfs demo 還沒有這個需求。
 
-#### Initialization Flow
+### `__maybe_unused` 為什麼會出現
+
+某些 kernel config 沒有啟用對應 PM 選項時，PM callback 可能不會被 macro 使用。`__maybe_unused` 的作用是告訴編譯器：這個函式在某些 config 下沒有被引用是可接受的。
+
+| 作法 | 結果 |
+|---|---|
+| 加 `__maybe_unused` | 減少不同 config 下的 unused warning。 |
+| 不加 | 在某些 config 組合下可能出現未使用函式 warning。 |
+
+## 11. Build and Boot Scripts API
+
+### `scripts/01_build_kernel.sh`
+
+Direct Observation：
+
+- 設定 `ARCH=arm64`。
+- 設定 `CROSS_COMPILE=aarch64-linux-gnu-`。
+- 下載 Linux 6.6.30。
+- 執行 `make defconfig`。
+- 執行 `make -j$(nproc) Image modules`。
+- 偵測並處理 clock skew。
+
+關鍵 robustness：
+
+| 機制 | 目的 |
+|---|---|
+| `set -euo pipefail` | 遇到未處理錯誤時停止。 |
+| `normalize_future_timestamps()` | 修正未來時間檔案，避免 make clock skew。 |
+| `run_make_checked()` | make 失敗時印出完整 log；clock skew 時重試。 |
+
+### `dts/patch_dtb.sh`
+
+Direct Observation：
+
+- 用 `qemu-system-aarch64 -machine virt,dumpdtb=...` 產生 base DTB。
+- 用 `dtc` 解析 base DTB。
+- 檢查 myled 目標 MMIO range 是否與既有 `reg` 重疊。
+- 用 `dtc -@` 編譯 overlay。
+- 用 `fdtoverlay` 合併 final DTB。
+- 用 `grep` 驗證 final DTB 中存在 `myled-controller@0d000000`。
+
+### `scripts/04_build_rootfs.sh`
+
+Direct Observation：
+
+- 檢查 ARM64 BusyBox。
+- 檢查 `rootfs/overlay/myled_ctrl.ko` 存在。
+- 建立必要目錄。
+- 建立 BusyBox applet symlink。
+- 複製 `/init`、`/test_myled.sh`、`/myled_ctrl.ko`。
+- 用 `cpio --quiet -H newc -o | gzip -9` 打包 initramfs。
+
+### `scripts/05_run_qemu.sh`
+
+Direct Observation：
+
+- 啟動 `qemu-system-aarch64`。
+- 使用 ARM64 `virt` machine。
+- 載入 kernel Image、DTB、initramfs。
+- kernel command line 使用 `console=ttyAMA0`，讓輸出走 QEMU serial console。
+
+## 12. Rootfs Runtime Scripts
+
+### `/init`
+
+Direct Observation：
+
+開機後 `/init` 會：
+
+1. 掛載 `proc`。
+2. 掛載 `sysfs`。
+3. 掛載 `devtmpfs`。
+4. 載入 `/myled_ctrl.ko`。
+5. 執行 `/test_myled.sh`。
+6. 進入 shell。
+
+TTY robustness：
+
+- 優先使用 `setsid cttyhack sh`。
+- 如果環境不支援，再退回一般 shell。
+
+### `/test_myled.sh`
+
+Direct Observation：
+
+測試內容：
+
+| 檢查 | 目的 |
+|---|---|
+| 搜尋 modalias 含 `myvendor,myled-v1` 的 platform device | 確認 compatible match 的 device 存在。 |
+| 接受 `0d000000.myled-controller` 與 `d000000.myled-controller` | 避免 leading zero 命名差異造成誤判。 |
+| 檢查 `of_node` 指向 `myled-controller@0d000000` | 確認真實 DT node 名稱正確。 |
+| 檢查 `driver` symlink | 確認 driver 已 bind。 |
+| 檢查 `myled/` sysfs directory | 確認 sysfs group 建立成功。 |
+| 檢查 `info enable brightness color blink status` | 確認 attributes 存在。 |
+| 寫入再讀回 `brightness`、`color`、`blink`、`enable` | 確認 store/show path 正常。 |
+
+## 13. Error Handling Map
+
+### Driver Error Handling
+
+| 位置 | 條件 | 回傳 / 行為 | 意義 |
+|---|---|---|---|
+| `devm_kzalloc()` | 配置失敗 | `-ENOMEM` | 無 private data，不能繼續。 |
+| `of_property_read_u32(num-leds)` | property 缺失 | default `1` | 非致命，使用保守預設值。 |
+| `platform_get_resource()` | 找不到 MEM resource | `-ENODEV` | 沒有 MMIO resource，driver 不應 bind。 |
+| resource base/size check | 不符合 `0x0d000000/0x1000` | `-EINVAL` | 防止 DTS 與 driver 預期不一致。 |
+| `devm_ioremap_resource()` | 映射失敗 | fallback simulated mode | 非 simulated mode 可退回 shadow register。 |
+| `myled_hw_init()` | register init 失敗 | 回傳錯誤 | probe 中止。 |
+| `sysfs_create_group()` | 建立失敗 | shutdown 後回傳錯誤 | 避免半初始化 device 留在系統中。 |
+| sysfs parser | 使用者輸入非法 | 回傳 parser 錯誤或 `-EINVAL` | user space 可感知失敗。 |
+
+### Script Error Handling
+
+| Script | 防呆 |
+|---|---|
+| `01_build_kernel.sh` | clock skew 偵測、make 失敗印 log。 |
+| `02_patch_dtb.sh` | 檢查 kernel image、呼叫 DTB patch script。 |
+| `dts/patch_dtb.sh` | base DTB 必須產生成功、MMIO 不可 overlap、merged node 必須存在。 |
+| `03_build_driver.sh` | 使用 kernel build system，失敗即停止。 |
+| `04_build_rootfs.sh` | BusyBox 架構檢查、`.ko` 檔案檢查。 |
+| `05_run_qemu.sh` | 啟動前檢查 kernel、DTB、initramfs 是否存在。 |
+| `06_clean.sh` | 支援 dry-run，降低誤刪風險。 |
+
+## 13A. 錯誤碼與 Logging API 教學
+
+Kernel driver 通常不會用 exception，而是用負的 error code 回報失敗。log 則用 `dev_*()` 系列，因為它會自動帶出 device 名稱，比單純 `pr_info()` 更容易追到是哪個 device 出事。
+
+### 常見錯誤碼怎麼選
+
+| 錯誤碼 | 常見意義 | 本專案使用情境 | 選擇依據 |
+|---|---|---|---|
+| `-ENOMEM` | 記憶體配置失敗 | `devm_kzalloc()` 失敗 | 沒有 private data，driver 無法繼續初始化。 |
+| `-ENODEV` | 裝置不存在或缺必要裝置資訊 | 找不到 MEM resource | 沒有 `reg` 轉成的 resource，就不能代表這個 device 可被 driver 控制。 |
+| `-EINVAL` | 參數或資料不合法 | MMIO base/size 不符、brightness 超過 255 | 有資料，但內容不符合 driver 要求。 |
+| `-ERANGE` | 數值超出可接受範圍 | register offset 超出 mapped MMIO resource | 和 `-EINVAL` 接近，但更明確表示範圍問題。 |
+
+### `IS_ERR()`、`PTR_ERR()`、`IS_ERR_OR_NULL()` 怎麼看
+
+有些 kernel API 失敗時不是回傳 `NULL`，而是回傳 encoded error pointer。
+
+| API / Macro | 用途 | 適合情境 | 本專案關係 |
+|---|---|---|---|
+| `IS_ERR(ptr)` | 判斷 pointer 是否是 error pointer。 | API 文件說明失敗會回傳 `ERR_PTR(...)`。 | `devm_ioremap_resource()` 後使用。 |
+| `PTR_ERR(ptr)` | 從 error pointer 取出負錯誤碼。 | 需要把錯誤原因記錄或回傳。 | ioremap 失敗時取出 `ret`。 |
+| `IS_ERR_OR_NULL(ptr)` | 同時接受 error pointer 與 NULL。 | API 可能回傳 NULL 或 ERR_PTR。 | 本專案沒有需要，因為 `devm_ioremap_resource()` 的失敗語意是 ERR_PTR。 |
+
+### Logging API 比較
+
+| API | 會帶 device context | 適合情境 | 本專案使用方式 |
+|---|---|---|---|
+| `dev_err(dev, ...)` | 是 | 會造成 probe 失敗或功能不可用的錯誤。 | 缺 MEM resource、MMIO 不符合預期、sysfs 建立失敗。 |
+| `dev_warn(dev, ...)` | 是 | 可 fallback，但需要提醒的狀況。 | `num-leds` 缺失時使用預設值、shutdown 失敗警告。 |
+| `dev_info(dev, ...)` | 是 | 重要狀態，例如 probe 成功、MMIO range、simulated mode。 | 開機 log 方便確認流程。 |
+| `dev_dbg(dev, ...)` | 是 | 開發除錯訊息，通常需要 debug config 或 dynamic debug 才明顯。 | sysfs 寫入成功時的細節。 |
+| `pr_info(...)` | 否 | 和特定 device 無關的全域訊息。 | 本 driver 主要和 device 有關，所以不優先用。 |
+
+### Logging 選擇圖
+
+```mermaid
+flowchart TD
+    EVENT["發生一個狀態或錯誤"] --> FATAL{"會讓 probe 失敗 ?"}
+    FATAL -->|"yes"| ERR["dev_err"]
+    FATAL -->|"no"| FALLBACK{"有 fallback 但值得提醒 ?"}
+    FALLBACK -->|"yes"| WARN["dev_warn"]
+    FALLBACK -->|"no"| IMPORTANT{"是重要狀態 ?"}
+    IMPORTANT -->|"yes"| INFO["dev_info"]
+    IMPORTANT -->|"no"| DBG["dev_dbg"]
+```
+
+本專案的 log 原則是：開機流程中必須看得到的狀態用 `dev_info()`，會停止流程的錯誤用 `dev_err()`，可恢復但不應被忽略的狀況用 `dev_warn()`。
+
+## 14. Bug Analysis
+
+### Summary Table
+
+| BUG | 症狀 | Root Cause | Fix | Verification |
+|---|---|---|---|---|
+| MMIO address collision | resource 可能撞到 QEMU 既有 device | `reg` 位址任意選可能重疊 | 固定 `0x0d000000`，patch script 掃 base DTB `reg`，driver 再驗 base/size | `scripts/02_patch_dtb.sh` 通過，QEMU log 顯示正確 MMIO range |
+| DT node 不等於真硬體 | 直接碰不存在 MMIO 風險高 | QEMU 沒有 myled device model | DTS 加 `myvendor,simulated`，driver 用 `sim_regs[]` | QEMU log 顯示 simulated mode，sysfs test 通過 |
+| sysfs drvdata 空窗 | callback 可能拿不到 `priv` | sysfs 建立前未先綁 drvdata 會有風險 | `sysfs_create_group()` 前先 `platform_set_drvdata()` / `dev_set_drvdata()` | sysfs 讀寫全部通過 |
+| RMW lost update | enable/blink 可能互相覆蓋 | read 與 write 若分開 lock，不是 atomic RMW | `myled_reg_update_bits()` 在單一 lock 內完成 RMW | `blink`、`enable` 讀寫回讀通過 |
+| register offset 越界 | 未來新增功能可能誤讀寫 | 底層 helper 若不檢查 offset，風險集中在 MMIO | `myled_validate_reg_access()` | `W=1` build 通過，sysfs 正常 |
+| BusyBox 架構錯誤 | `/init` 無法執行 | initramfs 內 binary 不是 ARM64 | rootfs build 檢查 binary architecture | rootfs build 與 QEMU boot 通過 |
+| kernel build clock skew | make warning 或失敗 | WSL/檔案時間偏移 | 只 touch 未來時間檔案並重試 | kernel build 通過 |
+| platform device leading zero | 測試找錯 sysfs path | kernel device name 不保證保留 leading zero | test script 同時接受兩種名稱，並檢查 `of_node` | test output 顯示 `d000000.myled-controller` 且 of_node 正確 |
+| kernel-doc warning | `W=1` build warning | 一般註解誤用 `/**` | 改普通 block comment | `W=1` module build 無 warning |
+| QEMU no controlling tty | shell 提示 can't access tty | initramfs shell 未建立 controlling terminal | 使用 `setsid cttyhack sh` fallback | QEMU 可進 shell |
+
+### Detailed Example: MMIO Collision
+
+錯誤風險：
 
 ```text
-[Build]
-01_build_kernel.sh
-  -> download linux-6.6.30
+device A reg = 0x09000000-0x09000fff
+myled    reg = 0x09000000-0x09000fff
+```
+
+這代表兩個 driver 會認為自己控制同一段硬體。即使 driver 能編譯成功，runtime 也可能錯。
+
+本專案防線：
+
+```text
+防線 1: DTS 固定 reg = 0x0d000000/0x1000
+防線 2: patch_dtb.sh 合併前掃 base DTB reg overlap
+防線 3: myled_probe() 檢查 resource start/size
+防線 4: test_myled.sh 檢查 of_node 必須是 myled-controller@0d000000
+```
+
+## 15. Call Graph
+
+### Build-time Call Graph
+
+```text
+scripts/01_build_kernel.sh
   -> make defconfig
   -> make Image modules
 
-02_patch_dtb.sh
+scripts/02_patch_dtb.sh
   -> dts/patch_dtb.sh
-  -> qemu-system-aarch64 -machine virt,dumpdtb=qemu-virt-base.dtb
-  -> dtc -I dts -O dtb -@ myled-fragment.dts
-  -> fdtoverlay base + myled-fragment.dtbo
-  -> qemu-virt-myled.dtb
+      -> qemu-system-aarch64 -machine virt,dumpdtb=...
+      -> dtc -I dtb -O dts
+      -> dtc -I dts -O dtb -@
+      -> fdtoverlay
 
-03_build_driver.sh
-  -> make -C KDIR M=driver ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
-  -> make install
-  -> rootfs/overlay/myled_ctrl.ko
+scripts/03_build_driver.sh
+  -> make -C linux-6.6.30 M=driver ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
 
-04_build_rootfs.sh
-  -> copy BusyBox, init, test_myled.sh, myled_ctrl.ko
-  -> pack rootfs/initramfs.cpio.gz
-
-[Boot]
-05_run_qemu.sh
-  -> QEMU boots Image + qemu-virt-myled.dtb + initramfs
-  -> rdinit=/init
-  -> /init mounts proc/sys/dev
-  -> insmod /myled_ctrl.ko
-  -> platform driver registration
-  -> OF compatible match
-  -> myled_probe
-  -> sysfs group available
+scripts/04_build_rootfs.sh
+  -> copy BusyBox/init/test/module
+  -> cpio + gzip
 ```
 
-#### Runtime Flow
+### Boot-time Call Graph
 
 ```text
-/init
-  -> sh /test_myled.sh
-  -> DEV=$(ls /sys/bus/platform/devices | grep "0d000000" | sed -n '1p')
-  -> MYLED=/sys/bus/platform/devices/${DEV}/myled
-  -> read info enable brightness color blink status
-  -> echo 200 > brightness
-  -> echo ff3300 > color
-  -> echo 1 > blink
-  -> echo 0 > enable
-  -> cat info
-  -> dmesg | grep -i myled
+scripts/05_run_qemu.sh
+  -> qemu-system-aarch64
+      -> Linux kernel parses DTB
+      -> creates platform_device for myled-controller@0d000000
+      -> initramfs /init
+          -> insmod /myled_ctrl.ko
+              -> module_platform_driver generated init
+              -> platform_driver_register
+              -> OF match
+              -> myled_probe
+                  -> devm_kzalloc
+                  -> of_property_read_u32/string/bool
+                  -> platform_get_resource
+                  -> resource_size
+                  -> resource base/size validation
+                  -> platform_set_drvdata / dev_set_drvdata
+                  -> myled_hw_init
+                  -> sysfs_create_group
+                  -> pm_runtime_enable
+          -> /test_myled.sh
+              -> write/read sysfs attributes
 ```
 
-#### Cleanup Flow
+### sysfs Write Call Graph
 
 ```text
-driver remove/unbind/module unload
-  -> myled_remove
-  -> pm_runtime_disable
-  -> sysfs_remove_group
-  -> myled_hw_shutdown
-  -> devm cleanup later
-
-script cleanup
-  -> scripts/06_clean.sh
-  -> removes driver build artifacts, DTB artifacts, rootfs artifacts
-  -> optionally runs mrproper in linux-* / removes kernel source with --all
+echo 200 > brightness
+  -> VFS sysfs write
+  -> brightness_store(dev, attr, buf, count)
+      -> dev_get_drvdata(dev)
+      -> kstrtou32(buf, 10, &val)
+      -> if val > 255 return -EINVAL
+      -> myled_reg_write(priv, MYLED_REG_BRIGHTNESS, val)
+          -> myled_validate_reg_access
+          -> spin_lock_irqsave
+          -> simulated ? sim_regs[index] = val : writel(val, base + off)
+          -> spin_unlock_irqrestore
+      -> return count
 ```
 
-#### Event Flow
+### sysfs Read Call Graph
 
 ```text
-Device Tree event:
-  DT node status="okay" + compatible="myvendor,myled-v1"
-  -> platform device exists
-  -> platform bus match
-  -> probe callback
-
-User sysfs event:
-  user read/write file
-  -> sysfs attribute callback
-  -> dev_get_drvdata
-  -> register helper
-  -> simulated array or MMIO
-
-PM event:
-  system suspend
-  -> dev_pm_ops suspend callback
-  -> clear ENABLE
-  system resume
-  -> dev_pm_ops resume callback
-  -> set ENABLE
+cat info
+  -> VFS sysfs read
+  -> info_show(dev, attr, buf)
+      -> dev_get_drvdata(dev)
+      -> myled_reg_read VERSION
+      -> myled_reg_read CTRL
+      -> myled_reg_read BRIGHTNESS
+      -> myled_reg_read COLOR
+      -> sysfs_emit formatted status
 ```
 
-#### Ownership Transfer
+## 16. Synchronization Analysis
 
-目前程式碼中未觀察到跨 subsystem 的 explicit buffer ownership transfer。可驗證的 ownership 主要是：
+### Direct Observation
 
-- `priv` 與 `base` 交給 devm framework 管理。
-- sysfs group 由 driver create/remove 成對管理。
-- `pdev/dev` 保存 `priv` pointer，但不取得 `priv` 的手動釋放責任。
+Register access 使用 `spin_lock_irqsave()` 與 `spin_unlock_irqrestore()`。
 
----
+適用原因：
 
-## 第二階段：Architecture / API Technical Report
+- sysfs callback 可能被不同 process 同時觸發。
+- suspend/resume callback 也會修改 `CTRL`。
+- `CTRL` 的 bit 更新需要 read-modify-write 原子性。
 
-### 1. Entry Point 行為
+目前保護範圍：
 
-#### # Direct Observation
-
-此 driver 的 kernel entry point 不是傳統顯式 `module_init()`，而是 `module_platform_driver(myled_driver)`。它把 `myled_driver` 交給 platform driver framework，並由 framework 在 module load/unload 時註冊/反註冊 driver。
-
-在此專案的 QEMU demo flow 中，module load 由 `rootfs/overlay/init:16` 的 `insmod /myled_ctrl.ko` 觸發；不是從目前 rootfs script 觀察到的 udev/modprobe 自動載入。`MODULE_DEVICE_TABLE(of, myled_of_match)` 存在，但「是否會被 userspace 自動載入」無法從現有 rootfs 內容確認，因為目前 `/init` 使用的是直接 `insmod`。
-
-`myled_probe` 是 driver 被 platform bus bind 後的實際初始化入口。它的行為依序是：
-
-1. 分配 `struct myled_priv`。
-2. 初始化 back pointer 與 spinlock。
-3. 讀取 Device Tree properties。
-4. 取得與 mapping MEM resource。
-5. 設定 simulated fallback state。
-6. 綁定 drvdata。
-7. 初始化 register state。
-8. 建立 sysfs group。
-9. 啟用 runtime PM framework。
-
----
-
-### 2. Callback Registration Chain
-
-#### Platform / OF Callback Registration
-
-```text
-myled_driver
-  .probe = myled_probe
-  .remove = myled_remove
-  .driver.name = "myled_ctrl"
-  .driver.of_match_table = myled_of_match
-  .driver.pm = &myled_pm_ops
-```
-
-`myled_of_match` 裡的 `"myvendor,myled-v1"` 對應到 `dts/myled-fragment.dts:27` 的 compatible。這是 probe 能發生的直接證據。第二個 compatible `"myvendor,myled"` 在目前 DTS 中未使用，但程式碼支援。
-
-#### Sysfs Callback Registration
-
-`DEVICE_ATTR_RW/RO` macro 會產生 `dev_attr_*` 物件，`myled_attrs[]` 把它們聚合，`myled_attr_group` 則把 group name 設為 `"myled"`。`myled_probe` 呼叫 `sysfs_create_group(&dev->kobj, &myled_attr_group)` 後，使用者才有 `/sys/bus/platform/devices/<DEV>/myled/*` 可操作。
-
-callback chain 如下：
-
-```text
-sysfs file read/write
-  -> struct device_attribute generated by DEVICE_ATTR_*
-  -> *_show or *_store
-  -> dev_get_drvdata(dev)
-  -> register helper
-```
-
-#### PM Callback Registration
-
-`myled_pm_ops` 使用 `SET_SYSTEM_SLEEP_PM_OPS(myled_suspend, myled_resume)`。可直接驗證的是 system sleep callback；目前程式碼中未觀察到 runtime PM operation table callback。
-
----
-
-### 3. Runtime Dispatch Flow
-
-#### sysfs `enable`
-
-- `enable_show`：讀 `MYLED_REG_CTRL`，輸出 enable bit。
-- `enable_store`：`kstrtobool` parse，true 時 set `MYLED_CTRL_ENABLE`，false 時 clear。
-- error handling：parse 失敗直接回傳錯誤；不更改 register。
-
-#### sysfs `brightness`
-
-- `brightness_show`：讀 `MYLED_REG_BRIGHTNESS`。
-- `brightness_store`：`kstrtou32` 以 base 10 parse；若大於 `MYLED_MAX_BRIGHTNESS` 則回傳 `-EINVAL`；成功才寫 register。
-- lifecycle role：probe 時 `myled_hw_init` 也會寫入 initial brightness；remove/shutdown 時歸零。
-
-#### sysfs `color`
-
-- `color_show`：讀 `MYLED_REG_COLOR`，mask 成 24-bit，輸出 `%06x`。
-- `color_store`：`kstrtou32(buf, 16, &val)` parse hex，寫入 `val & 0xFFFFFF`。
-- error handling：parse 失敗直接回傳錯誤。
-
-#### sysfs `blink`
-
-- `blink_show`：讀 CTRL blink bit。
-- `blink_store`：`kstrtobool` parse 後 set/clear `MYLED_CTRL_BLINK`。
-- cleanup role：`myled_hw_shutdown` 會清掉 blink bit。
-
-#### sysfs `status`
-
-- `status_show`：讀 `MYLED_REG_STATUS`，輸出 `ready` 與 `fault`。
-- 此 attribute 是 read-only，沒有 store path。
-- 在 simulated fallback 時，`myled_hw_init` 會設定 `MYLED_STATUS_READY`。
-
-#### sysfs `info`
-
-- `info_show`：讀 VERSION、CTRL、BRIGHTNESS、COLOR，再輸出 `num_leds`、`simulated` 與 bit decode。
-- 此 attribute 是 read-only，扮演 snapshot/debug interface。
-
----
-
-### 4. Indirect Call Path
-
-#### # Direct Observation
-
-此專案的 indirect dispatch 主要有四類：
-
-1. platform driver core 透過 `myled_driver.probe/remove` 呼叫本 driver。
-2. OF matching 透過 `myled_driver.driver.of_match_table` 比對 DTS compatible。
-3. sysfs core 透過 `dev_attr_*` 的 generated show/store callback 呼叫本 driver。
-4. PM core 透過 `myled_pm_ops` 呼叫 suspend/resume。
-
-目前程式碼中未觀察到 IRQ dispatch table、file_operations、miscdevice operations、net_device_ops、workqueue callback 或 timer callback。
-
----
-
-### 5. Resource Lifecycle
-
-#### Managed Resource Model
-
-`devm_kzalloc` 與 `devm_ioremap_resource` 表示 `priv` 與 MMIO mapping 都不在 `myled_remove` 中手動釋放。`myled_remove` 只處理 framework 不會自動替 driver 做的 logical cleanup：disable PM runtime、remove sysfs group、shutdown hardware state。
-
-#### sysfs Lifecycle
-
-```text
-myled_probe
-  -> sysfs_create_group
-  -> userspace can access myled attributes
-
-myled_remove
-  -> sysfs_remove_group
-  -> userspace path disappears
-```
-
-`sysfs_create_group` 若失敗，程式碼會呼叫 `myled_hw_shutdown(priv)` 後回傳錯誤。由於 sysfs 尚未建立，該錯誤路徑不需要 `sysfs_remove_group`。
-
-#### Register Backend Lifecycle
-
-初始化時有兩種 backend：
-
-- MMIO backend：`platform_get_resource` 成功且 `devm_ioremap_resource` 成功，先嘗試讀 VERSION。
-- simulated backend：缺 MEM resource、ioremap 失敗、或 VERSION 不是 `MYLED_HW_VERSION` 時啟用。
-
-`myled_hw_init` 裡若 VERSION mismatch，會設定：
-
-```text
-priv->simulated = true
-sim_regs[VERSION / 4] = MYLED_HW_VERSION
-sim_regs[STATUS / 4] = MYLED_STATUS_READY
-```
-
-然後 brightness 與 enable 都透過 register helper 寫入，因此會寫到目前選定的 backend。
-
----
-
-### 6. Error Propagation Path
-
-#### Probe Error Handling
-
-| 錯誤點 | 目前行為 | 是否中止 probe |
+| Path | 是否上鎖 | 說明 |
 |---|---|---|
-| `devm_kzalloc` 失敗 | return `-ENOMEM` | 是 |
-| `of_property_read_u32(..., "num-leds")` 失敗 | warn，`priv->num_leds = 1` | 否 |
-| `of_property_read_string(..., "label")` 失敗 | 不印 label | 否 |
-| `platform_get_resource` 失敗 | warn，`priv->simulated = true` | 否 |
-| `devm_ioremap_resource` 失敗 | warn，`base = NULL`，`simulated = true` | 否 |
-| VERSION mismatch | warn，切 simulated mode，seed VERSION/STATUS | 否 |
-| `myled_hw_init` return non-zero | dev_err，return error | 是；但目前 `myled_hw_init` 實作固定 return 0 |
-| `sysfs_create_group` 失敗 | dev_err，`myled_hw_shutdown`，return error | 是 |
+| `myled_reg_read()` | 是 | 讀取 simulated array 或 MMIO。 |
+| `myled_reg_write()` | 是 | 寫入 simulated array 或 MMIO。 |
+| `myled_reg_update_bits()` | 是 | 在同一個 lock 內完成 RMW。 |
 
-#### sysfs Error Handling
+### Conservative Inference
 
-| Attribute | parse / validation | error |
-|---|---|---|
-| `enable` | `kstrtobool` | parse 失敗回傳 ret |
-| `brightness` | `kstrtou32` base 10；`val <= 255` | parse 失敗回傳 ret；超過 255 回傳 `-EINVAL` |
-| `color` | `kstrtou32` base 16 | parse 失敗回傳 ret；成功後 mask 24-bit |
-| `blink` | `kstrtobool` | parse 失敗回傳 ret |
+目前沒有 IRQ handler、workqueue 或 timer，因此 synchronization 主要面對 sysfs 並行與 PM callback。若未來加入 IRQ 或 background worker，應重新檢查 lock ordering 與是否可能在 atomic context 呼叫會睡眠的 API。
 
-#### Cleanup Error Handling
+## 16A. 同步 API 教學與選擇依據
 
-`myled_remove` 沒有檢查 `priv` 是否為 `NULL`。在正常 platform driver flow 中，`priv` 應由 successful probe 設定；若 probe 未完成而呼叫 remove，通常 driver core 不會對未 bind 成功的 device 呼叫 remove。這是基於 Linux driver model 的保守推論，不是此專案內部額外防護。
+同步機制的選擇要看兩件事：保護的資料是什麼，以及 critical section 內會不會睡眠。這個專案保護的是 register access path，操作很短，內容是讀寫 `sim_regs[]` 或 `readl()` / `writel()`。
 
----
+### `spinlock`、`mutex`、`atomic_t` 怎麼選
 
-### 7. Synchronization Role
-
-#### # Direct Observation
-
-`myled_reg_read` 與 `myled_reg_write` 都使用：
-
-```text
-spin_lock_irqsave(&priv->lock, flags)
-...
-spin_unlock_irqrestore(&priv->lock, flags)
-```
-
-保護的共享狀態是：
-
-- `priv->sim_regs[]`。
-- MMIO access sequence 中的 `readl/writel` 呼叫。
-
-`irqsave` 可避免同 CPU interrupt context 在持鎖期間重入同一把 lock。不過目前程式碼中未觀察到任何 IRQ handler，因此這個選擇比較像保守保護，而不是已存在 IRQ path 的必要需求。
-
-#### # Conservative Inference
-
-sysfs show/store 可能由不同 process 同時呼叫；因此使用 spinlock 能避免單次 read 或 write 對 `sim_regs` 的資料競爭。不過 `myled_reg_set_bits` 與 `myled_reg_clr_bits` 是由「一次 read helper + 一次 write helper」組成，整個 read-modify-write 沒有被同一個 lock critical section 包住。若兩個 sysfs writers 同時修改不同 CTRL bit，存在 lost update 的可能。這不是從測試腳本必然觸發的 bug，但從 helper 實作可直接看出風險。
-
----
-
-### 8. 比較分析
-
-#### 類似 API 行為：`enable_store` vs `blink_store`
-
-兩者都：
-
-- 使用 `dev_get_drvdata(dev)` 取回 `priv`。
-- 使用 `kstrtobool` parse input。
-- 依 bool 結果呼叫 `myled_reg_set_bits` 或 `myled_reg_clr_bits`。
-- 作用於 `MYLED_REG_CTRL`。
-
-差異：
-
-- `enable_store` 操作 `MYLED_CTRL_ENABLE`，並呼叫 `dev_dbg` 記錄 enabled/disabled。
-- `blink_store` 操作 `MYLED_CTRL_BLINK`，沒有 debug log。
-
-使用原因只能從 code 行為說明：兩者都是 CTRL bit toggling path，因此共用 bit helper；enable 另外記錄 log，blink 沒有。無法從現有內容確認為何 blink 不記錄 log。
-
-#### 類似 API 行為：`brightness_store` vs `color_store`
-
-兩者都：
-
-- 使用 `kstrtou32` parse 數值。
-- 寫入單一 register。
-
-差異：
-
-- `brightness_store` 使用 base 10，且檢查 `val <= MYLED_MAX_BRIGHTNESS`。
-- `color_store` 使用 base 16，並以 `val & 0xFFFFFF` 限制 RRGGBB。
-
-使用原因可從 code 直接看出：brightness register 的合法範圍由 `MYLED_MAX_BRIGHTNESS` 限制；color 則保留低 24 bits 對應 `%06x` 顯示格式。
-
-#### Callback 機制差異：Platform callback vs Sysfs callback vs PM callback
-
-| 機制 | 註冊位置 | 觸發來源 | data 取得方式 | lifecycle role |
-|---|---|---|---|---|
-| platform callback | `myled_driver.probe/remove` | driver core bind/unbind | `struct platform_device *pdev` | 建立/清理 device instance。 |
-| sysfs callback | `DEVICE_ATTR_*` + `sysfs_create_group` | userspace read/write sysfs | `dev_get_drvdata(dev)` | runtime control/data observation。 |
-| PM callback | `myled_pm_ops` | system sleep/resume | `dev_get_drvdata(dev)` | suspend/resume 時調整 enable state。 |
-
-#### Dispatch Model
-
-此 driver 使用 Linux framework dispatch，而不是手寫 event loop：
-
-- platform bus dispatch：以 OF compatible 和 `platform_driver` operation table 為核心。
-- sysfs dispatch：以 attribute table 為核心。
-- PM dispatch：以 `dev_pm_ops` 為核心。
-
-目前程式碼中未觀察到 user-defined dispatch loop 或 command parser。
-
-#### Resource Management Model
-
-| Resource | 管理方式 | cleanup 位置 |
-|---|---|---|
-| `struct myled_priv` | `devm_kzalloc` | driver core/devm 自動釋放 |
-| MMIO mapping | `devm_ioremap_resource` | driver core/devm 自動釋放 |
-| sysfs group | explicit create/remove | `myled_probe` / `myled_remove` |
-| hardware logical state | explicit init/shutdown | `myled_hw_init` / `myled_hw_shutdown` |
-| initramfs build artifact | shell script copy/pack | `scripts/06_clean.sh` 可清 |
-
-使用原因只能依 code 說明：記憶體與 MMIO 使用 devm API，所以 remove 不需要手動 free/unmap；sysfs 與 hardware state 則有 explicit API/state change，因此 driver 自己在 remove path 做對應 cleanup。
-
----
-
-### 9. Debug / Risk Analysis
-
-#### Potential Memory Leak
-
-- `priv` 使用 `devm_kzalloc`，正常 remove path 未觀察到手動 `kfree` 缺失造成的 leak。
-- `base` 使用 `devm_ioremap_resource`，正常 remove path 未觀察到手動 `iounmap` 缺失造成的 leak。
-- `sysfs_create_group` 成功後，`myled_remove` 有 `sysfs_remove_group`。若 `sysfs_create_group` 失敗，程式碼會 `myled_hw_shutdown` 並 return error；沒有建立 sysfs group，因此不需要 remove group。
-- 目前程式碼中未觀察到額外 `kmalloc`、`alloc_chrdev_region`、`device_create`、`class_create` 等需要額外 unwind 的 resource。
-
-#### Invalid Ownership Transfer
-
-- 目前程式碼中未觀察到把 stack memory 或 freed memory 傳給 callback 保存的情況。
-- `label` 是在 `myled_probe` 的 block 內由 `of_property_read_string` 取出後只用於 `dev_info`，沒有保存到 `priv`；因此沒有 string ownership 問題。
-- `priv` 同時透過 `platform_set_drvdata` 與 `dev_set_drvdata` 綁定。兩者指向同一個 devm-managed object；正常 flow 下沒有雙重釋放，因為 driver 沒有手動 free。
-
-#### Callback Misuse Risk
-
-- sysfs callbacks 假設 `dev_get_drvdata(dev)` 一定回傳有效 `priv`。因為 `myled_probe` 在 `sysfs_create_group` 前已呼叫 `dev_set_drvdata`，正常 create 後的 sysfs callback 可取得 `priv`。
-- `myled_remove` 順序是先 `sysfs_remove_group` 再 `myled_hw_shutdown`，可降低 remove 後新的 sysfs callback 進入 driver 的機會。
-- 目前程式碼中未觀察到 explicit reference counting 或 open/close model；sysfs core 本身處理 attribute callback 的 kobject lifecycle。此處不額外推測 kernel core 細節。
-
-#### Lifecycle Mismatch
-
-- `pm_runtime_enable(dev)` 有在 `myled_remove` 用 `pm_runtime_disable(dev)` 對應。
-- 目前程式碼有啟用 runtime PM，但沒有 runtime PM callbacks。這不一定是錯誤，但 report 必須標示：目前只能驗證 system sleep suspend/resume 行為，無法從現有程式碼確認 runtime suspend/resume 實際狀態轉換。
-- `myled_hw_init` 的 VERSION mismatch 會切到 simulated mode，但若 `devm_ioremap_resource` 已成功，`base` mapping 仍存在直到 devm cleanup；這是 devm-managed lifetime，不是 leak。不過 runtime register path 會因 `priv->simulated = true` 改用 `sim_regs`，不再使用 mapped `base`。
-
-#### Concurrency Issue
-
-- 有 evidence 的同步機制：`myled_reg_read/write` 使用 `spin_lock_irqsave`。
-- 有 evidence 的風險：`myled_reg_set_bits` / `myled_reg_clr_bits` 的 read-modify-write 不是單一 critical section。兩個 concurrent sysfs writers 若同時修改 CTRL register 不同 bit，可能出現 lost update。例如一個 writer set ENABLE，另一個 writer set BLINK，兩者都先讀到舊值，再各自寫回不同 bit 組合，最後可能只保留其中一個 bit。
-- 目前程式碼中未觀察到 IRQ handler，因此無法主張已有 IRQ 與 sysfs 競爭；只能說 lock 使用了 irqsave，但 IRQ path 不存在於目前 codebase。
-
-#### Build / Script Risk
-
-- `scripts/04_build_rootfs.sh:18` 的 `BUSYBOX` 是固定到使用者路徑 `~/桌面/Linux-kernel/qemu-platform-demo/busybox-1.36.1/busybox`。這是 script 可攜性風險；同檔案中原本有較通用的 busybox discovery 寫法但被註解。此點來自 script 直接觀察。
-- `rootfs/overlay/test_myled.sh` 以 `grep "0d000000"` 尋找 device。若 `/sys/bus/platform/devices` 下有多個名稱包含 `0d000000` 的 device，script 會取第一個。現有 DTS 只建立一個 `myled-controller@0d000000`，但 script 本身不是嚴格 match exact device name。
-- `rootfs/overlay/init` 與部分 scripts 目前存在文字編碼亂碼；不影響此報告對 shell command 的結構分析，但可能影響 demo 顯示訊息可讀性。
-
----
-
-## 補充：Register / DT / Sysfs 對照
-
-### Register Macro
-
-| Macro | 定義位置 | 值 | 使用角色 |
-|---|---|---:|---|
-| `MYLED_REG_CTRL` | `driver/myled_ctrl.h:10` | `0x00` | enable/blink/pwm bit register。 |
-| `MYLED_REG_BRIGHTNESS` | `driver/myled_ctrl.h:11` | `0x04` | brightness register。 |
-| `MYLED_REG_COLOR` | `driver/myled_ctrl.h:12` | `0x08` | 24-bit color register。 |
-| `MYLED_REG_STATUS` | `driver/myled_ctrl.h:13` | `0x0C` | ready/fault status register。 |
-| `MYLED_REG_VERSION` | `driver/myled_ctrl.h:14` | `0x10` | hardware version register。 |
-| `MYLED_CTRL_ENABLE` | `driver/myled_ctrl.h:17` | `BIT(0)` | enable control bit。 |
-| `MYLED_CTRL_BLINK` | `driver/myled_ctrl.h:18` | `BIT(1)` | blink control bit。 |
-| `MYLED_CTRL_PWM_AUTO` | `driver/myled_ctrl.h:19` | `BIT(2)` | shutdown 時會清除；目前沒有 sysfs store path 設定它。 |
-| `MYLED_STATUS_READY` | `driver/myled_ctrl.h:22` | `BIT(0)` | simulated fallback 時設定。 |
-| `MYLED_STATUS_FAULT` | `driver/myled_ctrl.h:23` | `BIT(1)` | `status_show` 會讀取；目前程式碼中未觀察到任何 path 設定此 bit。 |
-| `MYLED_MAX_BRIGHTNESS` | `driver/myled_ctrl.h:26` | `255U` | brightness validation / clamp。 |
-| `MYLED_HW_VERSION` | `driver/myled_ctrl.h:27` | `0xAB01U` | VERSION check 與 simulated seed。 |
-| `MYLED_SIM_REG_COUNT` | `driver/myled_ctrl.h:28` | `8` | `sim_regs` array 大小。 |
-
-### Device Tree Property
-
-| Property | DTS 位置 | Driver 使用位置 | 影響 |
+| API / 機制 | 可否睡眠 | 適合情境 | 本專案是否適合 |
 |---|---|---|---|
-| `compatible = "myvendor,myled-v1"` | `dts/myled-fragment.dts:27` | `myled_of_match` | 觸發 OF/platform match。 |
-| `reg = <0x0 0x0d000000 0x0 0x1000>` | `dts/myled-fragment.dts:28` | `platform_get_resource` / `devm_ioremap_resource` | 提供 MMIO base/size。 |
-| `num-leds = <4>` | `dts/myled-fragment.dts:29` | `of_property_read_u32` in `myled_probe` | 設定 `priv->num_leds`。 |
-| `label = "demo-rgb-led"` | `dts/myled-fragment.dts:30` | `of_property_read_string` in `myled_probe` | 只用於 log。 |
-| `default-brightness = <180>` | `dts/myled-fragment.dts:31` | `of_property_read_u32` in `myled_hw_init` | 初始化 brightness，並 clamp 到 255。 |
-| `status = "okay"` | `dts/myled-fragment.dts:32` | kernel DT/platform population | 啟用 node；driver 沒有直接讀此 property。 |
+| `spinlock_t` | 不可睡眠 | 很短的 critical section、register bit update、可能被不同 context 共用。 | 本專案使用。 |
+| `mutex` | 可以睡眠 | 保護較長流程，或 critical section 內會呼叫可能睡眠的 API。 | sysfs-only 情境可考慮，但本專案 register helper 很短，不需要 mutex。 |
+| `atomic_t` / `atomic_long_t` | 不可睡眠 | 單一整數計數或簡單狀態。 | 不適合，因為 RMW 要保護的是整個 register 值與多個 bit。 |
+| 無鎖 | 無 | 單一 writer 或資料競爭不影響結果。 | 不適合，因為 `enable` 與 `blink` 都會改 `CTRL`。 |
 
-### Sysfs Attribute
+選擇依據：
 
-| Attribute | show | store | Register / State | Test script evidence |
-|---|---|---|---|---|
-| `enable` | `enable_show` | `enable_store` | `MYLED_REG_CTRL` / `MYLED_CTRL_ENABLE` | `test_myled.sh:56-58` 寫 0 後讀回。 |
-| `brightness` | `brightness_show` | `brightness_store` | `MYLED_REG_BRIGHTNESS` | `test_myled.sh:38-40` 寫 200 後讀回。 |
-| `color` | `color_show` | `color_store` | `MYLED_REG_COLOR` low 24-bit | `test_myled.sh:44-46` 寫 `ff3300` 後讀回。 |
-| `blink` | `blink_show` | `blink_store` | `MYLED_REG_CTRL` / `MYLED_CTRL_BLINK` | `test_myled.sh:50-52` 寫 1 後讀回。 |
-| `status` | `status_show` | 目前沒有 | `MYLED_REG_STATUS` | `test_myled.sh:32-33` 讀取。 |
-| `info` | `info_show` | 目前沒有 | VERSION/CTRL/BRIGHTNESS/COLOR + `num_leds`/`simulated` | `test_myled.sh:62` dump。 |
+- `CTRL` register 有多個 bit，`enable` 與 `blink` 會寫同一個 register。
+- `myled_reg_update_bits()` 必須保護整段 read-modify-write，而不是只保護單次 read 或 write。
+- critical section 內沒有會睡眠的 API，所以可以用 spinlock。
 
----
+### `spin_lock_irqsave()` 與 `spin_lock()` 怎麼選
 
-## 結論
+| API | 行為 | 適合情境 | 本專案選擇 |
+|---|---|---|---|
+| `spin_lock()` | 只拿 lock，不保存 interrupt state。 | 確定不會和 interrupt context 共用同一把 lock。 | 可用，但保守性較低。 |
+| `spin_lock_irqsave()` | 拿 lock，並保存/關閉本 CPU interrupt state。 | low-level helper 未來可能被 IRQ 或更複雜 context 共用。 | 本專案使用。 |
 
-`qemu-platform-demo` 目前實作的是一個以 Device Tree match 觸發的 Linux platform driver demo。核心 execution semantics 是：QEMU 使用 patched DTB 產生 `myled-controller@0d000000` platform device；rootfs `/init` 手動 `insmod` driver；platform bus 根據 compatible 呼叫 `myled_probe`；probe 建立 devm-managed private state、解析 DT、嘗試 MMIO mapping，若無法確認 hardware version 則切換到 simulated shadow register bank；接著建立 named sysfs group，讓 userspace 透過 `enable`、`brightness`、`color`、`blink`、`status`、`info` 間接操作或觀察 register state。
+目前專案沒有 IRQ handler，因此 `spin_lock()` 在現階段也能運作。不過 register helper 是底層共用函式，未來若加入 IRQ 或其他 context，`spin_lock_irqsave()` 比較不容易因呼叫來源變多而踩到同一把 lock 的中斷重入問題。
 
-此專案最重要的 callback chain 是 platform driver callback、sysfs attribute callback 與 system sleep PM callback。ownership 上沒有複雜 buffer transfer，主要依賴 devm 管理 `priv` 與 MMIO mapping，並由 explicit remove path 管理 sysfs group 與 logical hardware shutdown。可驗證風險集中在 read-modify-write helper 的 lock granularity、runtime PM callback 缺席但 runtime PM 被 enable、以及 rootfs build script 中 hard-coded BusyBox path。
+### 同步保護範圍圖
+
+```mermaid
+flowchart TD
+    A["enable_store()"] --> U["myled_reg_update_bits()"]
+    B["blink_store()"] --> U
+    C["myled_suspend()"] --> U
+    D["myled_resume()"] --> U
+    U --> V["validate offset"]
+    V --> L["spin_lock_irqsave"]
+    L --> R["read CTRL"]
+    R --> M["modify selected bits"]
+    M --> W["write CTRL"]
+    W --> UL["spin_unlock_irqrestore"]
+```
+
+圖中的重點是：多個入口都會走到同一個 update helper，所以 lock 應該放在 helper 裡，而不是散在每個 caller 裡。這樣未來新增新的 sysfs attribute 時，也比較不容易忘記上鎖。
+
+## 17. Memory and Resource Ownership
+
+### Direct Observation
+
+| Resource | Owner | Acquisition | Release |
+|---|---|---|---|
+| `struct myled_priv` | device-managed | `devm_kzalloc()` | device release 或 probe failure 自動釋放 |
+| MMIO mapping | device-managed | `devm_ioremap_resource()` | device release 或 probe failure 自動釋放 |
+| sysfs group | driver manual | `sysfs_create_group()` | `sysfs_remove_group()` |
+| runtime PM state | driver manual | `pm_runtime_enable()` | `pm_runtime_disable()` |
+| simulated registers | inside `priv` | `devm_kzalloc()` 包含 | 跟 `priv` 一起釋放 |
+
+### Why sysfs Is Manual
+
+`sysfs_create_group()` 不是 `devm_` API。本專案在 `remove()` 中明確呼叫 `sysfs_remove_group()`，避免 module remove 或 device unbind 後 sysfs 檔案仍存在。
+
+## 17A. 資源生命週期 API 教學
+
+Driver 的資源管理可以分成兩類：device-managed resource 和 manual resource。兩者不是誰比較高級，而是生命週期不同。
+
+### 資源清理流程圖
+
+```mermaid
+flowchart TD
+    PROBE["probe() 開始"] --> DEVM1["devm_kzalloc(priv)"]
+    DEVM1 --> DEVM2["devm_ioremap_resource<br/>非 simulated mode"]
+    DEVM2 --> MANUAL1["sysfs_create_group"]
+    MANUAL1 --> MANUAL2["pm_runtime_enable"]
+    MANUAL2 --> RUN["device running"]
+    RUN --> REMOVE["remove()"]
+    REMOVE --> PMOFF["pm_runtime_disable"]
+    PMOFF --> SYSFSRM["sysfs_remove_group"]
+    SYSFSRM --> SHUTDOWN["myled_hw_shutdown"]
+    SHUTDOWN --> DEVREL["device release / probe failure cleanup"]
+    DEVREL --> AUTO["devm resources 自動釋放"]
+```
+
+### `devm_*` 與手動清理怎麼分
+
+| 類型 | 例子 | 清理方式 | 選擇依據 |
+|---|---|---|---|
+| device-managed | `devm_kzalloc()`、`devm_ioremap_resource()` | device detach 或 probe 失敗時自動清理。 | 資源完全屬於 device，沒有特別的關閉順序需求。 |
+| manual cleanup | `sysfs_create_group()` | `sysfs_remove_group()` | sysfs 是 user-visible 介面，remove 時要明確先拆掉入口，避免之後 callback 被呼叫。 |
+| manual state | `pm_runtime_enable()` | `pm_runtime_disable()` | enable/disable 是狀態切換，不只是記憶體釋放。 |
+| hardware state | controller enable / brightness | `myled_hw_shutdown()` | driver remove 時要把 device 狀態收乾淨。 |
+
+### 為什麼不全部都用 devm
+
+`devm_*` 很方便，但不是每個動作都適合交給 devm 自動處理。以本專案為例：
+
+- `priv` 和 MMIO mapping 沒有 user space 入口，適合 devm。
+- sysfs 檔案會讓 user space 進入 driver callback，remove 時應該主動先移除。
+- PM runtime 是狀態開關，應該和 `probe()` / `remove()` 對稱處理。
+- hardware shutdown 有順序要求，應放在 driver 可控的位置執行。
+
+### Probe 失敗時的資源狀態
+
+| 失敗位置 | 已建立資源 | 清理方式 |
+|---|---|---|
+| `devm_kzalloc()` 失敗 | 無 | 直接回傳。 |
+| resource 檢查失敗 | `priv` | devm 自動釋放。 |
+| `myled_hw_init()` 失敗 | `priv`，可能有 MMIO mapping | devm 自動釋放；sysfs 尚未建立。 |
+| `sysfs_create_group()` 失敗 | `priv`，已初始化硬體狀態 | 手動 `myled_hw_shutdown()`，devm 資源自動釋放。 |
+
+## 18. User-visible API Contract
+
+### sysfs Contract
+
+| File | Read output | Write input | Error behavior |
+|---|---|---|---|
+| `enable` | `0` 或 `1` | boolean | parse 失敗回傳錯誤。 |
+| `brightness` | decimal number | decimal `0..255` | 超過 255 回傳 `-EINVAL`。 |
+| `color` | `rrggbb` lowercase hex | hex value | 只保留低 24 bits。 |
+| `blink` | `0` 或 `1` | boolean | parse 失敗回傳錯誤。 |
+| `status` | `ready=<n> fault=<n>` | 不可寫 | read-only。 |
+| `info` | 多行狀態 | 不可寫 | read-only。 |
+
+### Example
+
+```sh
+echo 200 > brightness
+cat brightness
+# 200
+
+echo ff3300 > color
+cat color
+# ff3300
+
+echo 1 > blink
+cat blink
+# 1
+```
+
+## 19. Verified Execution Result
+
+### Direct Observation
+
+目前已確認：
+
+| 驗證 | 結果 |
+|---|---|
+| `bash -n` script syntax | pass |
+| kernel build | pass |
+| DTB patch | pass |
+| driver `W=1` build | pass |
+| rootfs build | pass |
+| QEMU boot | pass |
+| `/test_myled.sh` | pass |
+| `git diff --check` | pass |
+
+QEMU 中的重要輸出：
+
+```text
+[init] Module loaded OK
+myled_ctrl d000000.myled-controller: MMIO region: [0x0d000000 - 0x0d000fff]
+myled_ctrl d000000.myled-controller: simulated mode requested by Device Tree
+myled_ctrl d000000.myled-controller: HW init OK
+myled_ctrl d000000.myled-controller: probe() succeeded
+[PASS] platform device name = d000000.myled-controller
+[PASS] of_node = myled-controller@0d000000
+[PASS] driver bound
+[PASS] sysfs directory ready
+[PASS] brightness write/readback = 200
+[PASS] color write/readback = ff3300
+[PASS] blink write/readback = 1
+[PASS] enable write/readback = 0
+[PASS] myled sysfs test completed
+```
+
+備註：
+
+```text
+myled_ctrl: loading out-of-tree module taints kernel
+```
+
+這是外部 kernel module 的標準提示，不是本專案錯誤。
+
+## 20. Conservative Risk Analysis
+
+以下不是目前 BUG，而是未來擴充時需要注意的風險。
+
+| 擴充方向 | 風險 | 建議 |
+|---|---|---|
+| 加入真 QEMU MMIO device model | DT 與 QEMU device model 位址必須一致 | 保留 driver base/size check，並加入 QEMU device regression test。 |
+| 加入 IRQ | interrupt spec、handler context、locking 會更複雜 | 使用 `devm_request_irq()`，確認 handler 不呼叫會睡眠 API。 |
+| 加入 runtime PM callbacks | usage count 與 sysfs 操作可能交錯 | 定義明確的 active/idle policy，必要時在 sysfs store 前 resume device。 |
+| 多個 myled instance | 現在 driver 常數固定 base/size | 若要多實例，需改成允許多個 base，測試也要以 compatible/of_node 辨識。 |
+| 改成 char device | ioctl ABI 需要長期維護 | 先定義清楚 userspace ABI，再加 self-test。 |
+
+## 21. 常見觀念問答
+
+### Q1: 為什麼這個專案適合用 Platform Driver？
+
+因為 `myled-controller` 是 Device Tree 描述的 non-discoverable device。它不像 PCI/USB 能被硬體匯流排自動枚舉，所以要透過 `compatible` 與 platform bus 讓 kernel 找到對應 driver。
+
+### Q2: `compatible` 的作用是什麼？
+
+`compatible` 是 device 與 driver 的配對 key。DTS 寫 `myvendor,myled-v1`，driver 的 `of_match_table` 也支援 `myvendor,myled-v1`，kernel 才會呼叫 `myled_probe()`。
+
+### Q3: 為什麼要固定 `myled-controller@0d000000`？
+
+因為這個 device 的位置需要穩定，不能撞到 QEMU 既有 device address。固定 node name 與 MMIO base 後，script、driver、test 都能用同一個位址做驗證。
+
+### Q4: 為什麼 Device Tree 裡有節點，driver 還要 simulated mode？
+
+Device Tree 只描述硬體，不會自動讓 QEMU 產生硬體。若 QEMU 沒有實作該 MMIO device model，直接存取 MMIO 可能不安全。simulated mode 用 shadow register 跑完 driver 流程，同時避免碰不存在的硬體。
+
+### Q5: 為什麼 `probe()` 要檢查 resource base/size？
+
+這是 runtime 防線。即使 DTS 被改錯，只要 driver bind 到不符合 `0x0d000000/0x1000` 的 resource，就會回傳 `-EINVAL`，避免錯誤繼續擴大。
+
+### Q6: 為什麼不用全域變數保存狀態？
+
+Platform driver 可能有多個 device instance。用 `struct myled_priv` 搭配 drvdata，可以讓每個 device 有自己的狀態，也比較符合 Linux driver model。
+
+### Q7: 為什麼 sysfs callback 要回傳錯誤？
+
+因為 user space 需要知道寫入是否成功。例如 `brightness > 255` 應該回傳 `-EINVAL`，讓測試或操作人員知道輸入不合法，而不是靜默忽略。
+
+### Q8: 這份專案最重要的 BUG 修正是哪個？
+
+需要優先處理的是 MMIO 位址衝突防護與 simulated mode。前者避免撞到 QEMU 既有 device，後者讓沒有真硬體的情況下仍能安全跑完 driver 流程。這兩個問題如果沒有先處理，後面的 sysfs 測試即使通過，也可能只是碰巧沒有踩到錯誤。
+
+## 22. Final Checklist
+
+| 項目 | 狀態 |
+|---|---|
+| Device Tree node 固定為 `myled-controller@0d000000` | 完成 |
+| MMIO fixed at `0x0d000000/0x1000` | 完成 |
+| DTB overlay 前做 overlap check | 完成 |
+| Driver probe 做 base/size validation | 完成 |
+| simulated mode 避免不存在 MMIO | 完成 |
+| sysfs callbacks 有輸入檢查 | 完成 |
+| RMW 在同一個 lock 內完成 | 完成 |
+| rootfs 檢查 ARM64 BusyBox | 完成 |
+| QEMU boot 自動測試 | 完成 |
+| 文件與目前程式行為一致 | 完成 |

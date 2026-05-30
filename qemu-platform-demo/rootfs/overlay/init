@@ -1,27 +1,41 @@
 #!/bin/sh
-# Minimal /init for QEMU initramfs demo
+# QEMU initramfs 的 /init。
+# 工作順序：掛載基本檔案系統、載入 driver、執行自測，最後進入 shell 或等待。
 
-mount -t proc     none /proc
-mount -t sysfs    none /sys
+mount -t proc none /proc
+mount -t sysfs none /sys
 mount -t devtmpfs none /dev 2>/dev/null || mdev -s
 
 echo ""
-echo "╔══════════════════════════════════════════════════╗"
-echo "║  Platform Driver + Device Tree  — QEMU Demo     ║"
-echo "╚══════════════════════════════════════════════════╝"
+echo "=================================================="
+echo " Platform Driver + Device Tree - QEMU Demo"
+echo "=================================================="
 echo ""
 
-# ── Load our platform driver ────────────────────────────
 echo "[init] Loading myled_ctrl.ko ..."
-insmod /myled_ctrl.ko && echo "[init] Module loaded OK" \
-                      || echo "[init] Module load FAILED"
+if insmod /myled_ctrl.ko; then
+    echo "[init] Module loaded OK"
+else
+    echo "[init] Module load FAILED"
+fi
 
 echo ""
 dmesg | grep -i myled | sed 's/^/  [dmesg] /'
 echo ""
 
-# ── Run interactive demo ────────────────────────────────
 echo "[init] Running demo script ..."
-sh /test_myled.sh
+if sh /test_myled.sh; then
+    echo "[init] Demo script passed"
+else
+    echo "[init] Demo script failed"
+fi
 
-exec sh   # drop to shell for interactive exploration
+# 互動執行時進入 shell；自動化測試以 pipe 啟動時留在等待狀態。
+if [ -t 0 ]; then
+    exec /bin/busybox setsid /bin/busybox cttyhack sh
+fi
+
+echo "[init] No interactive TTY; waiting"
+while true; do
+    sleep 3600
+done

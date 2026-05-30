@@ -1,12 +1,20 @@
 # fwsh (Firmware Mini Shell) API 技術分析報告
 
-本報告只根據 `/fwsh` 目前實際存在的內容進行分析。分析優先順序為 source code、header file、build system、script、README/comment、實際呼叫流程。本次更新沿用既有 report 的兩階段結構：第一階段做 Codebase Trace，第二階段整理 Architecture / API Technical Report；重點補上可驗證的 execution flow、callback chain、ownership / lifecycle、resource flow、error path 與風險分析。
+本報告只根據目前 `/fwsh` 目錄中的程式碼、標頭檔、Makefile 和實際執行結果整理。目標是把 API、資料結構、執行流程、資源生命週期和錯誤路徑說清楚，讓第一次讀這份專案的人能順著呼叫關係看懂程式。
 
-以下內容分成：
+報告分成兩段：
 
-- `# Direct Observation`：可直接從目前程式碼、header 或 Makefile 驗證。
-- `# Conservative Inference`：只基於現有呼叫關係或 POSIX 行為的保守推論，會明確標示。
-- 若無法從現有內容確認，會標示「目前程式碼中未觀察到」或「無法從現有內容確認」。
+- **第一階段：Codebase Trace**
+  先列出檔案、模組、函式、資料結構和可直接觀察到的行為。
+
+- **第二階段：Architecture / API Technical Report**
+  進一步說明 execution flow、callback chain、ownership、resource lifecycle、error path、BUG 分析和後續改善方向。
+
+標示原則：
+
+- **Direct Observation**：可從目前程式碼、Makefile 或本次實際執行直接驗證。
+- **Conservative Inference**：根據目前呼叫關係或 POSIX 行為做出的保守推論，會明確標示。
+- 若目前無法從程式碼確認，會寫「目前程式碼中未觀察到」。
 
 ---
 
@@ -14,553 +22,381 @@
 
 ### 1. Project Structure
 
-#### # Direct Observation
+#### Direct Observation
 
 | 類別 | 檔案 | 角色 |
 |---|---|---|
-| source file | `src/main.c` | 程式入口，依序呼叫 `shell_init()`、`shell_run()`、`shell_cleanup()`。 |
-| source file | `src/shell.c` | global `ShellState g_shell`、signal handlers、prompt 建立、GNU Readline REPL、history 管理、parse/execute/free 串接。 |
-| source file | `src/parser.c` | 內部 `Lexer`、quote-aware word reader、`parse_line()`、`free_pipeline()`；將輸入字串解析成 `Pipeline` / `Cmd`。 |
-| source file | `src/executor.c` | process execution engine；處理 built-in direct execution、pipe、fork、dup2、redirection、execvp、waitpid、background execution。 |
-| source file | `src/builtin.c` | built-in command dispatch table 與實作：`cd`、`pwd`、`exit/quit`、`help`、`history`、`clear`、`hexdump`、`crc32`、`memmap`。 |
-| header file | `include/shell.h` | 定義 `_POSIX_C_SOURCE`、版本/顏色 macro、限制值、`Cmd`、`Pipeline`、`ShellState`、shell lifecycle API。 |
-| header file | `include/parser.h` | 宣告 `parse_line()`、`free_pipeline()`，並註明 `parse_line` 會用 `strdup()` 配置字串，需 `free_pipeline()` 釋放。 |
-| header file | `include/executor.h` | 宣告 `execute_pipeline()`。 |
-| header file | `include/builtin.h` | 宣告 `is_builtin()`、`exec_builtin()`。 |
-| build system | `Makefile` | 使用 `gcc`、`-std=c11`、`-Iinclude`、`-lreadline`；自動收集 `src/*.c` 編成 `obj/*.o` 後連結成 `fwsh`。 |
-| docs | `docs/*.png` | demo 截圖；本報告未依圖片內容推導行為。 |
-| README/report | `README_fwsh.md`、`report_fwsh.md` | 說明性文件，僅作低優先級佐證。 |
+| Source | `src/main.c` | 程式入口。依序呼叫 `shell_init()`、`shell_run()`、`shell_cleanup()`。 |
+| Source | `src/shell.c` | Shell lifecycle、REPL、prompt、GNU Readline、history、signal handlers、全域 `g_shell`。 |
+| Source | `src/parser.c` | 命令列 parser。將輸入字串解析成 `Pipeline` 和 `Cmd`。 |
+| Source | `src/executor.c` | 執行引擎。處理 built-in direct execution、pipe、fork、dup2、redirection、execvp、waitpid、background。 |
+| Source | `src/builtin.c` | 內建指令 dispatch table 與實作：`cd`、`pwd`、`exit`、`quit`、`help`、`history`、`clear`、`hexdump`、`crc32`、`memmap`。 |
+| Header | `include/shell.h` | 共用 macro、`Cmd`、`Pipeline`、`ShellState`、shell lifecycle API。 |
+| Header | `include/parser.h` | 宣告 `parse_line()`、`free_pipeline()`。 |
+| Header | `include/executor.h` | 宣告 `execute_pipeline()`。 |
+| Header | `include/builtin.h` | 宣告 `is_builtin()`、`exec_builtin()`。 |
+| Build | `Makefile` | 使用 `gcc`、C11、`-Iinclude`、`-lreadline`，把 `src/*.c` 編成 `fwsh`。 |
+| Docs | `docs/*.png` | Demo 圖片，本報告不依圖片推論程式行為。 |
 
-#### Module / Component Relationship
+#### Module Relationship
+
+```mermaid
+flowchart TD
+    main["src/main.c<br/>main()"] --> shellInit["shell_init()"]
+    shellInit --> shellRun["shell_run()"]
+    shellRun --> readline["readline(prompt)"]
+    readline --> parser["parse_line(line, &pipeline)"]
+    parser --> pipeline["Pipeline / Cmd"]
+    pipeline --> executor["execute_pipeline(&pipeline)"]
+    executor --> builtins["exec_builtin(cmd)"]
+    executor --> external["fork() + execvp()"]
+    executor --> pipefd["pipe() + dup2()"]
+    shellRun --> cleanup["free_pipeline(&pipeline)"]
+    shellRun --> shellCleanup["shell_cleanup()"]
+```
+
+#### Execution Model Summary
 
 ```text
-main.c
+main()
   -> shell_init()
+       -> 設定 SIGCHLD / SIGINT / SIGTSTP
+       -> 設定 g_shell.running = 1
+       -> 啟用 Readline Tab completion
   -> shell_run()
+       -> readline()
+       -> parse_line()
+       -> execute_pipeline()
+       -> free_pipeline()
   -> shell_cleanup()
-
-shell.c
-  -> readline(prompt)
-  -> add_history(trimmed)
-  -> parse_line(trimmed, &pipeline)
-  -> execute_pipeline(&pipeline)
-  -> free_pipeline(&pipeline)
-
-parser.c
-  -> produces Pipeline:
-       Pipeline.ncmds
-       Pipeline.background
-       Pipeline.cmds[i].argv / argc / in_file / out_file / out_append
-
-executor.c
-  -> if single foreground builtin:
-       exec_builtin(cmd) in shell process
-  -> otherwise:
-       pipe()
-       fork()
-       child: dup2() + close() + exec_builtin() or execvp()
-       parent: close pipe fds + waitpid() or print background PIDs
-
-builtin.c
-  -> is_builtin(name)
-  -> exec_builtin(cmd)
-  -> builtins[] dispatch table
 ```
 
 ---
 
 ### 2. Semantic Element Extraction
 
-#### # Direct Observation
+#### Public API
 
-以下只列目前實際存在的元素。
+| API | 定義位置 | 宣告位置 | 功能 | 呼叫者 |
+|---|---|---|---|---|
+| `shell_init()` | `src/shell.c` | `include/shell.h` | 初始化 signal、Readline、Shell 狀態，印出 banner。 | `main()` |
+| `shell_run()` | `src/shell.c` | `include/shell.h` | 進入 REPL 主迴圈。 | `main()` |
+| `shell_cleanup()` | `src/shell.c` | `include/shell.h` | 釋放 history 和 Readline history。 | `main()` |
+| `parse_line()` | `src/parser.c` | `include/parser.h` | 將一行字串解析成 `Pipeline`。 | `shell_run()` |
+| `free_pipeline()` | `src/parser.c` | `include/parser.h` | 釋放 `Pipeline` 內部 `strdup()` 產生的字串。 | `shell_run()` |
+| `execute_pipeline()` | `src/executor.c` | `include/executor.h` | 執行一個 `Pipeline`。 | `shell_run()` |
+| `is_builtin()` | `src/builtin.c` | `include/builtin.h` | 判斷指令名稱是否為內建指令。 | `execute_pipeline()` |
+| `exec_builtin()` | `src/builtin.c` | `include/builtin.h` | 執行內建指令。 | `execute_pipeline()` |
 
-| 類型 | 名稱 | 定義位置 | 說明 |
+#### Important Internal Functions
+
+| 函式 | 檔案 | 功能 |
+|---|---|---|
+| `sigchld_handler()` | `src/shell.c` | 使用 `waitpid(-1, NULL, WNOHANG)` 非阻塞回收 child。 |
+| `sigint_handler()` | `src/shell.c` | 處理 Ctrl+C，清空目前輸入行並重繪 prompt。 |
+| `build_prompt()` | `src/shell.c` | 組出 `[fwsh user@host path]$` prompt。 |
+| `lexer_init()` | `src/parser.c` | 初始化 parser 內部 lexer。 |
+| `skip_whitespace()` | `src/parser.c` | 跳過空白字元。 |
+| `read_word()` | `src/parser.c` | 讀取一個 word，處理單引號與雙引號。 |
+| `setup_redirections()` | `src/executor.c` | 在 child 中設定 `<`、`>`、`>>`。 |
+| `exec_external()` | `src/executor.c` | 在 child 中執行外部指令。 |
+| `crc32_build_table()` | `src/builtin.c` | 建立 CRC-32 查找表。 |
+
+#### Macro / Constants
+
+| 名稱 | 定義位置 | 說明 |
+|---|---|---|
+| `_POSIX_C_SOURCE 200809L` | `include/shell.h` | 啟用 POSIX API 宣告，例如 `strdup()`。 |
+| `FWSH_VERSION` | `include/shell.h` | 版本字串，目前為 `1.0.0`。 |
+| `MAX_INPUT` | `include/shell.h` | 單行輸入緩衝區上限，2048。 |
+| `MAX_ARGS` | `include/shell.h` | 單一 command 最大 argv 數，128。 |
+| `MAX_HISTORY` | `include/shell.h` | fwsh 自己保存的 history 筆數，50。 |
+| `MAX_PIPES` | `include/shell.h` | Pipeline 最多 command 段數，16。 |
+| `COLOR_*` | `include/shell.h` | ANSI 顏色 escape code。 |
+
+#### API 關鍵字補充
+
+| 關鍵字 | 英文 | 說明 | 在 `fwsh` 中的例子 |
 |---|---|---|---|
-| API | `shell_init` | `src/shell.c:62` / `include/shell.h:78` | 初始化 signal handlers、設定 `g_shell.running = 1`、印 banner、設定 Readline tab completion。 |
-| API | `shell_run` | `src/shell.c:129` / `include/shell.h:79` | 主 REPL loop，讀取輸入、管理 history、解析 pipeline、執行 pipeline、釋放 pipeline。 |
-| API | `shell_cleanup` | `src/shell.c:174` / `include/shell.h:80` | 釋放 `g_shell.history[]` 與呼叫 `rl_clear_history()`。 |
-| API | `parse_line` | `src/parser.c:122` / `include/parser.h:28` | 將一行輸入解析成 `Pipeline`。 |
-| API | `free_pipeline` | `src/parser.c:224` / `include/parser.h:36` | 釋放 `Pipeline` 內由 `strdup()` 配置的字串。 |
-| API | `execute_pipeline` | `src/executor.c:106` / `include/executor.h:30` | 執行 `Pipeline`，處理 builtins、pipe/fork/exec/wait/background。 |
-| API | `is_builtin` | `src/builtin.c:82` / `include/builtin.h:24` | 查詢 command name 是否存在於 `builtins[]`。 |
-| API | `exec_builtin` | `src/builtin.c:88` / `include/builtin.h:30` | 透過 `builtins[]` dispatch table 呼叫 built-in function pointer。 |
-| macro | `_POSIX_C_SOURCE 200809L` | `include/shell.h:14` | 啟用 POSIX API feature visibility，例如 `strdup`。 |
-| macro | `FWSH_VERSION` | `include/shell.h:29` | banner/help 使用的版本字串。 |
-| macro | `MAX_INPUT` | `include/shell.h:37` | parser `wordbuf` 大小上限，2048。 |
-| macro | `MAX_ARGS` | `include/shell.h:38` | 單一 `Cmd.argv` 最大元素數，128。 |
-| macro | `MAX_HISTORY` | `include/shell.h:39` | `ShellState.history` 環形緩衝區大小，50。 |
-| macro | `MAX_PIPES` | `include/shell.h:40` | `Pipeline.cmds[]`、executor `pipes/pids` array 大小，16。 |
-| macro | `COLOR_*` | `include/shell.h:30-34` | ANSI color escape strings。 |
-| struct | `Cmd` | `include/shell.h:48-54` | 單一 command，含 `argv`、`argc`、input/output redirection。 |
-| struct | `Pipeline` | `include/shell.h:57-61` | 多段 command 與 background flag。 |
-| struct | `ShellState` | `include/shell.h:68-73` | shell runtime state：history ring、count/head、running flag。 |
-| global state | `ShellState g_shell` | `src/shell.c:25` | shell-wide state，供 shell loop 與 builtins 使用。 |
-| internal struct | `Lexer` | `src/parser.c:42-45` | parser 內部 cursor，含 input pointer 與 byte position。 |
-| callback / signal handler | `sigchld_handler` | `src/shell.c:36` | `SIGCHLD` handler，使用 `waitpid(-1, NULL, WNOHANG)` 回收 child。 |
-| callback / signal handler | `sigint_handler` | `src/shell.c:52` | `SIGINT` handler，呼叫 `write` 與 Readline APIs 清 line/redisplay。 |
-| function pointer | `BuiltinEntry.func` | `src/builtin.c:48-52` | 指向 `int (*func)(Cmd*)`，由 dispatch table 使用。 |
-| dispatch table | `builtins[]` | `src/builtin.c:54-77` | name/function/description 三欄 command table，最後 `{NULL, NULL, NULL}` sentinel。 |
-| memory management | `strdup(trimmed)` | `src/shell.c:157` | 將輸入命令存入 `g_shell.history`。 |
-| memory management | `strdup(wordbuf)` | `src/parser.c:177`、`194`、`205` | 為 redirection filename 與 argv 配置 heap 字串。 |
-| memory management | `free_pipeline` | `src/parser.c:224-241` | 釋放 `argv[]`、`in_file`、`out_file`。 |
-| memory management | `free(g_shell.history[i])` | `src/shell.c:176-179` | shell cleanup 時釋放 history ring。 |
-| execution model | `fork` / `execvp` | `src/executor.c:152`、`97` | 外部命令與 pipeline 以 child process 執行。 |
-| communication mechanism | `pipe` | `src/executor.c:136` | 建立 pipeline command 間的 fd pair。 |
-| communication mechanism | `dup2` | `src/executor.c:66`、`78`、`173`、`176` | 把檔案或 pipe fd 接到 stdin/stdout。 |
-| external interface | interactive terminal stdin/stdout | `src/shell.c:135` | `readline()` 取得使用者輸入，stdout/stderr 顯示結果與錯誤。 |
-| external interface | filesystem | `src/executor.c:61`、`73`；`src/builtin.c:256`、`351` | redirection、hexdump、crc32、memmap 開檔讀寫。 |
-| build target | `all` / `run` / `debug` / `valgrind` | `Makefile:59`、`97`、`101`、`108` | build/run/debug/valgrind workflow。 |
-
-#### 目前程式碼中未觀察到
-
-- AST tree 或 token array；parser 直接填 `Pipeline`。
-- quote expansion、environment variable expansion、glob expansion、command substitution。
-- job table、`fg` / `bg` / process group / terminal control。
-- pipeline 中每個 child 的 structured status array；只回傳最後 forked child 的 exit status。
-- thread、mutex、condition variable、atomic API。
-- network/socket IPC。
-- script 檔執行模式；目前可驗證入口是 interactive REPL。
+| 行程識別碼 | Process ID, PID | 作業系統分配給每個 process 的整數編號。 | 背景執行時印出的 `[background] 375534`。 |
+| 父行程 | Parent Process | 建立 child 的 process。 | `fwsh` 本身是外部指令的 parent。 |
+| 子行程 | Child Process | 由 `fork()` 建立的新 process。 | `ls`、`grep`、`sleep` 會在 child 中執行。 |
+| 行程映像 | Process Image | process 目前載入的程式碼、資料、堆疊等內容。 | `execvp()` 成功後，child 的 process image 變成外部程式。 |
+| 結束狀態 | Exit Status | child 結束後留給 parent 讀取的狀態。 | parent 用 `waitpid()` 取得後，再用 `WEXITSTATUS()` 取 exit code。 |
+| 檔案描述符 | File Descriptor, FD | process 內用來代表 I/O 資源的整數。 | `0` 是 stdin，`1` 是 stdout，`2` 是 stderr。 |
+| 檔案描述符表 | File Descriptor Table | 每個 process 都有的 fd 對照表。 | `fork()` 後 child 會繼承 parent 當下開啟的 pipe fd。 |
+| 開啟檔案描述 | Open File Description | kernel 內部真正記錄檔案狀態的位置，例如 offset 和 flags。 | `dup2()` 後兩個 fd 可指向同一個 open file description。 |
+| 標準輸入 | Standard Input, stdin | 預設輸入來源，fd 是 0。 | `grep` 從 pipe 讀資料時，實際讀的是被 `dup2()` 改接後的 stdin。 |
+| 標準輸出 | Standard Output, stdout | 預設輸出目的地，fd 是 1。 | `wc -c > out.txt` 會把 stdout 改接到檔案。 |
+| 標準錯誤 | Standard Error, stderr | 錯誤輸出目的地，fd 是 2。 | `fprintf(stderr, ...)` 用來印 parser 或 executor 錯誤。 |
+| 阻塞 | Blocking | 呼叫後如果條件未滿足，process 會等待。 | 前景 `waitpid(pid, &status, 0)` 會等 child 結束。 |
+| 非阻塞 | Non-blocking | 呼叫後不等待，無結果也會立刻回來。 | `waitpid(-1, NULL, WNOHANG)` 用於背景行程回收。 |
+| 檔案結尾 | End Of File, EOF | 讀取端確認沒有更多資料。 | pipe 寫端全部關閉後，讀端才會收到 EOF。 |
+| 競爭條件 | Race Condition | 兩個流程存取同一狀態，結果取決於先後順序。 | `SIGCHLD` handler 和 foreground `waitpid()` 都可能回收 child。 |
+| 可重入 | Reentrant | 函式不依賴共享可變狀態，可較安全地被重複進入。 | `parser.c` 用區域 `Lexer`，避免 parser 狀態放全域。 |
+| Signal 安全 | Async-signal-safe | 可以在 signal handler 裡安全呼叫的函式。 | `write()` 通常安全；`printf()` 不適合在 handler 中呼叫。 |
+| 緩衝區 | Buffer | 暫存資料的記憶體區塊。 | `hexdump` 每次用 `uint8_t buf[16]` 讀 16 bytes。 |
+| 堆積區 | Heap | 動態配置記憶體所在區域，需要手動釋放。 | `strdup()` 建立的 argv 字串由 `free_pipeline()` 釋放。 |
+| 堆疊區 | Stack | 函式區域變數常用的記憶體區域，離開函式後失效。 | `wordbuf[MAX_INPUT]` 是 parser 的暫存 buffer。 |
+| 擁有權 | Ownership | 誰負責釋放或關閉某個資源。 | `Pipeline` 擁有 parser 複製出的字串。 |
+| 哨兵值 | Sentinel | 用特定值表示資料結尾。 | `builtins[]` 最後一筆 `{NULL, NULL, NULL}`。 |
 
 ---
 
-### 3. API / Macro Inventory
+### 3. Data Structure Inventory
+
+#### `Cmd`
+
+`Cmd` 是一段可執行指令。
+
+```c
+typedef struct {
+  char* argv[MAX_ARGS];
+  int argc;
+  char* in_file;
+  char* out_file;
+  int out_append;
+} Cmd;
+```
+
+| 欄位 | 意義 | 由誰設定 | 由誰使用 | Ownership |
+|---|---|---|---|---|
+| `argv` | `execvp()` 格式的參數陣列，最後一格必須是 `NULL`。 | `parse_line()` | `is_builtin()`、`exec_builtin()`、`execvp()` | 字串由 `strdup()` 建立，`free_pipeline()` 釋放。 |
+| `argc` | argv 實際參數數量。 | `parse_line()` | parser bounds check、executor、builtins | value，不需釋放。 |
+| `in_file` | `< file` 的檔名。 | `parse_line()` | `setup_redirections()` | `strdup()` 建立，`free_pipeline()` 釋放。 |
+| `out_file` | `>` 或 `>>` 的檔名。 | `parse_line()` | `setup_redirections()` | `strdup()` 建立，`free_pipeline()` 釋放。 |
+| `out_append` | `1` 代表 `>>`，`0` 代表 `>`。 | `parse_line()` | `setup_redirections()` | value，不需釋放。 |
+
+#### `Pipeline`
+
+`Pipeline` 是一行輸入解析後的最高層結構。
+
+```c
+typedef struct {
+  Cmd cmds[MAX_PIPES];
+  int ncmds;
+  int background;
+} Pipeline;
+```
+
+| 欄位 | 意義 | 由誰設定 | 由誰使用 |
+|---|---|---|---|
+| `cmds` | pipeline 中所有 command。 | `parse_line()` | `execute_pipeline()`、`free_pipeline()` |
+| `ncmds` | 有效 command 數量。 | `parse_line()` | executor fork 數量、cleanup 範圍 |
+| `background` | 是否背景執行。 | `parse_line()` | executor 是否 wait |
+
+#### `ShellState`
+
+`ShellState` 是 Shell 全域狀態。
+
+```c
+typedef struct {
+  char* history[MAX_HISTORY];
+  int hist_count;
+  int hist_head;
+  int running;
+} ShellState;
+```
+
+| 欄位 | 意義 | 使用位置 |
+|---|---|---|
+| `history` | fwsh 自己保存的 history ring buffer。 | `shell_run()`、`builtin_history()`、`shell_cleanup()` |
+| `hist_count` | 目前可顯示的 history 筆數。 | `shell_run()`、`builtin_history()` |
+| `hist_head` | 下一筆 history 寫入位置。 | `shell_run()`、`builtin_history()` |
+| `running` | REPL 是否繼續。 | `shell_init()`、`shell_run()`、`builtin_exit()` |
+
+---
+
+### 4. API / Macro Inventory by Lifecycle
 
 #### Initialization
 
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 關聯 struct / data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|---|
-| `main` | entry function | `src/main.c:12` | process start | OS runtime | 呼叫 shell lifecycle 三階段 | `shell_init/run/cleanup` | 決定程式總體生命週期。 |
-| `shell_init` | function | `src/shell.c:62` | `src/main.c:13` | startup | 設定 `SIGCHLD`、`SIGINT`、`SIGTSTP`；設定 running；印 banner；綁 tab completion | `g_shell.running`、Readline | 讓 REPL 可開始運作並具備 signal 行為。 |
-| `sigemptyset` | POSIX API | call at `src/shell.c:65` | `shell_init` | startup | 初始化 `sa.sa_mask` | `struct sigaction sa` | signal handler mask setup。 |
-| `sigaction` | POSIX API | `src/shell.c:69`、`72`、`76` | `shell_init` | startup | 註冊 signal handlers / ignore SIGTSTP | `sigchld_handler`、`sigint_handler`、`SIG_IGN` | 建立 async event dispatch path。 |
-| `rl_bind_key` | Readline API | call at `src/shell.c:90` | `shell_init` | startup | 將 tab 綁到 `rl_complete` | Readline state | 啟用 tab completion。 |
+| 名稱 | 類型 | 直接效果 | 重要性 |
+|---|---|---|---|
+| `main()` | Entry function | 呼叫 shell 三階段 lifecycle。 | 保持入口簡單，方便追流程。 |
+| `shell_init()` | Public API | 設定 signal handler、banner、Readline completion、`running`。 | 決定 Shell 啟動後的互動行為。 |
+| `sigaction()` | POSIX API | 註冊 `SIGCHLD`、`SIGINT`、忽略 `SIGTSTP`。 | 建立非同步事件處理流程。 |
+| `rl_bind_key()` | Readline API | 將 Tab 綁到 `rl_complete`。 | 啟用 Tab 補全。 |
 
-#### Registration
+#### Runtime Input
 
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 關聯 struct / data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|---|
-| `builtins[]` | dispatch table | `src/builtin.c:54` | `is_builtin`、`exec_builtin`、`builtin_help` | runtime command dispatch | 註冊內建命令名稱、function pointer、描述 | `BuiltinEntry` | 新增內建命令只需加 table entry 與 function。 |
-| `BuiltinEntry.func` | function pointer | `src/builtin.c:50` | `exec_builtin` | runtime command dispatch | 指向 `builtin_cd` 等函式 | `Cmd*` | indirect call path 的核心。 |
-| `SRCS` / `OBJS` | Makefile variables | `Makefile:43-44` | `make all` | build | 自動收集 source 並轉成 object list | `src/*.c`、`obj/*.o` | 決定哪些 source 會被編進 binary。 |
-| `-include $(OBJS:.o=.d)` | dependency include | `Makefile:82` | make | build | 引入 header dependency files | `.d` files | header 變更可觸發重編。 |
+| 名稱 | 類型 | 直接效果 | Resource |
+|---|---|---|---|
+| `readline()` | Readline API | 讀取一行使用者輸入。 | 回傳 heap 字串，由 `free(line)` 釋放。 |
+| `add_history()` | Readline API | 加入 Readline 內部 history。 | Readline 管理，最後 `rl_clear_history()`。 |
+| `strdup(trimmed)` | POSIX API | 複製一份輸入到 `g_shell.history`。 | `shell_cleanup()` 或覆寫 slot 前釋放。 |
 
-#### Execution Path
+#### Parsing
 
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 關聯 struct / data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|---|
-| `shell_run` | function | `src/shell.c:129` | `src/main.c:14` | startup | REPL loop | `g_shell.running`、`Pipeline` | Shell 的主要 runtime loop。 |
-| `build_prompt` | helper | `src/shell.c:104` | `shell_run` | 每次 loop | 產生含 user/host/cwd 的 prompt | env `HOME` / `USER`、cwd、hostname | 影響 Readline 顯示，不改 parser/executor state。 |
-| `readline` | external API | call at `src/shell.c:135` | `shell_run` | runtime input | 讀取一行互動輸入 | heap `line` | 回傳的 line 由 caller `free(line)`。 |
-| `parse_line` | parser API | `src/parser.c:122` | `src/shell.c:165` | runtime | 將 trimmed line 填入 `Pipeline` | `Pipeline`、`Cmd`、`Lexer` | 成功才執行 pipeline。 |
-| `execute_pipeline` | executor API | `src/executor.c:106` | `src/shell.c:165` | runtime | 執行 parsed pipeline | `Pipeline`、`Cmd` | 觸發 builtin 或 fork/exec。 |
-| `free_pipeline` | cleanup API | `src/parser.c:224` | `src/shell.c:167` | runtime loop end | 釋放 parse 時 strdup 的字串 | `Pipeline` | 每次 command 後釋放 transient parse resource。 |
+| 名稱 | 類型 | 直接效果 | Resource |
+|---|---|---|---|
+| `parse_line()` | Public API | 將 `line` 填入 `Pipeline`。 | 內部 `strdup()` 的字串由 caller 呼叫 `free_pipeline()` 釋放。 |
+| `read_word()` | Internal helper | 讀出一個 word，支援 quote。 | 使用 caller 提供的 stack buffer。 |
+| `free_pipeline()` | Public API | 釋放 `argv`、`in_file`、`out_file`。 | 只釋放內部字串，不釋放 `Pipeline` 本身。 |
 
-#### Lifecycle
+#### Execution
 
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 關聯 struct / data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|---|
-| `g_shell.running` | state flag | `include/shell.h:72` / `src/shell.c:25` | `shell_init`、`shell_run`、`builtin_exit` | startup/runtime | 控制 REPL loop 是否繼續 | `ShellState` | `exit`/`quit` 將其設 0，使 `shell_run` 返回。 |
-| `builtin_exit` | builtin function | `src/builtin.c:160` | `exec_builtin` | user command | 設定 `g_shell.running = 0` | `ShellState` | 結束 REPL，回到 main cleanup。 |
-| `shell_cleanup` | cleanup function | `src/shell.c:174` | `src/main.c:15` | process exit | 釋放 shell-wide history resource | `g_shell.history`、Readline history | 完成 process cleanup。 |
-
-#### Memory Handling
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 關聯 struct / data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|---|
-| `strdup(trimmed)` | allocation API | call at `src/shell.c:157` | `shell_run` | after input | 複製 command 到 history ring | `g_shell.history[idx]` | 先 free 舊 slot，再保存新字串。 |
-| `strdup(wordbuf)` for `in_file` | allocation API | call at `src/parser.c:177` | `parse_line` | parse `< file` | 保存 input redirection filename | `Cmd.in_file` | executor 後續 open/dup2 使用。 |
-| `strdup(wordbuf)` for `out_file` | allocation API | call at `src/parser.c:194` | `parse_line` | parse `>` / `>>` | 保存 output redirection filename | `Cmd.out_file`、`out_append` | executor 後續 open/dup2 使用。 |
-| `strdup(wordbuf)` for argv | allocation API | call at `src/parser.c:205` | `parse_line` | parse command word | 保存 argv entry | `Cmd.argv[]`、`argc` | execvp/builtin 使用。 |
-| `free_pipeline` | cleanup API | `src/parser.c:224` | `shell_run` | after execution or parse attempt | 釋放 `argv`、`in_file`、`out_file` | `Pipeline` | 避免每次 command parse allocation 持續累積。 |
-| `rl_clear_history` | Readline cleanup API | call at `src/shell.c:181` | `shell_cleanup` | process shutdown | 清除 Readline 內部 history | Readline global state | 配合 shell 自己的 history cleanup。 |
-
-#### Synchronization
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 關聯 struct / data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|---|
-| `sigchld_handler` | async signal callback | `src/shell.c:36` | kernel signal delivery | child exit | 非阻塞回收 child | `waitpid(-1, WNOHANG)` | 主要服務 background child；也可能影響 foreground wait，見風險分析。 |
-| `sigint_handler` | async signal callback | `src/shell.c:52` | kernel signal delivery | Ctrl+C | 印 newline、操作 Readline line buffer | Readline state | Shell 本身不因 Ctrl+C 結束。 |
-
-目前程式碼中未觀察到 pthread mutex、semaphore、condition variable 或 atomic。主要同步/事件處理來自 signal 與 `waitpid`。
-
-#### Event Dispatch
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 關聯 struct / data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|---|
-| `is_builtin` | dispatch lookup | `src/builtin.c:82` | `execute_pipeline`、child path | runtime | 判斷 command name 是否在 `builtins[]` | `builtins[]` | 決定走 builtin 或 external。 |
-| `exec_builtin` | dispatch executor | `src/builtin.c:88` | `execute_pipeline` | runtime | 透過 function pointer 執行 builtin | `BuiltinEntry.func` | 單一前景 builtin 在 shell process 執行；pipeline/background builtin 在 child 執行。 |
-| `setup_redirections` | helper | `src/executor.c:58` | `exec_external` | child before execvp | 設定 `<`、`>`、`>>` | `Cmd.in_file/out_file/out_append` | 失敗時 child `_exit(1)`。 |
-| `exec_external` | helper | `src/executor.c:87` | child path | runtime | 設定 redirection 後 `execvp` | `Cmd.argv` | 成功不返回；失敗 `_exit(127)`。 |
-
-#### Logging / Debug
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|
-| `fprintf(stderr, ...)` | error output | 多處 | parser/executor/builtin | runtime errors | 顯示缺檔名、pipe/fork/open/exec/builtin 錯誤 | 通常伴隨 return non-zero 或 `_exit`。 |
-| `perror` | error output | `src/executor.c:137`、`155`；`src/builtin.c:150` | pipe/fork/pwd errors | runtime errors | 依 `errno` 顯示錯誤 | pipe failure return -1；fork failure break；pwd 仍 return 0。 |
-| `printf` | normal output | 多處 | banner/help/history/background/builtin results | runtime | 顯示 shell output | 對部分 lifecycle 有提示，例如 background PIDs、exit message。 |
-| `Makefile debug` | build target | `Makefile:101-104` | `make debug` | developer workflow | 加入 AddressSanitizer/UBSan flags | 用於偵錯，不是 runtime code path。 |
-| `Makefile valgrind` | build target | `Makefile:108-110` | `make valgrind` | developer workflow | 以 Valgrind 檢查記憶體 | 用於偵錯，不是 runtime code path。 |
-
-#### Error Handling
-
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|
-| parser return `-1` | error code | `src/parser.c:154`、`174`、`191`、`203` | `parse_line` | parse errors | too many pipes、缺 filename、too many args | `shell_run` 不呼叫 `execute_pipeline`，但仍呼叫 `free_pipeline`。 |
-| `setup_redirections` return `-1` | error code | `src/executor.c:64`、`76` | child path | file open failure | redirection open 失敗 | `exec_external` `_exit(1)`。 |
-| `pipe` failure | error path | `src/executor.c:136-143` | `execute_pipeline` | runtime | 關閉已建立 pipes 後 return -1 | 不 fork。 |
-| `fork` failure | error path | `src/executor.c:152-156` | `execute_pipeline` | runtime | `perror` 後 break | 已 fork 的 child 仍會被後續 parent wait。 |
-| `execvp` failure | error path | `src/executor.c:97-101` | child | runtime | 顯示錯誤並 `_exit(127)` | parent wait 後取得 127。 |
-| builtin return non-zero | status | builtin functions | `exec_builtin` | runtime | command-specific failure | 單一 foreground builtin 直接成為 `execute_pipeline` return；child builtin 用 `_exit(status)`。 |
+| 名稱 | 類型 | 直接效果 | Resource |
+|---|---|---|---|
+| `execute_pipeline()` | Public API | 執行 `Pipeline`。 | 建立 pipe fd、fork child、等待 child。 |
+| `is_builtin()` | Public API | 查 dispatch table。 | 不配置資源。 |
+| `exec_builtin()` | Public API | 呼叫對應 built-in function pointer。 | 視 builtin 而定。 |
+| `pipe()` | POSIX API | 建立讀端與寫端 fd。 | parent 和 child 都要 close。 |
+| `fork()` | POSIX API | 建立 child process。 | parent 需 wait 或背景回收。 |
+| `dup2()` | POSIX API | 改接 stdin/stdout。 | 原 fd 接好後可 close。 |
+| `execvp()` | POSIX API | 用外部程式替換 child process image。 | 成功後不會回到原本的 child 程式碼。 |
+| `waitpid()` | POSIX API | 等待或回收 child。 | 讀取 child exit status。 |
 
 #### Cleanup
 
-| 名稱 | 類型 | 定義位置 | 呼叫位置 | 呼叫來源 | 用途 | 關聯 struct / data | 對 execution flow 的影響 |
-|---|---|---|---|---|---|---|---|
-| `free_pipeline` | cleanup | `src/parser.c:224` | `src/shell.c:167` | every REPL iteration after parse attempt | 釋放 command-level heap strings | `Pipeline` | 每次輸入後清理 transient state。 |
-| `free(line)` | cleanup | `src/shell.c:150`、`168` | `shell_run` | empty / processed input | 釋放 Readline 回傳 line | `char* line` | 避免 Readline line leak。 |
-| `free(g_shell.history[idx])` | cleanup-before-overwrite | `src/shell.c:156` | `shell_run` | history ring overwrite | 釋放被覆蓋的舊 history | `ShellState.history` | 保持 history ring bounded。 |
-| `shell_cleanup` | cleanup | `src/shell.c:174` | `main` | program shutdown | 釋放全部 shell history 與 Readline history | `ShellState`、Readline | process exit 前釋放 global resources。 |
-| `close` | fd cleanup | `src/executor.c:67`、`79`、`140-141`、`180-181`、`205-206` | redirection/pipe paths | child/parent runtime | 關閉已 dup 或不再需要的 fd | pipe fd / redirection fd | 防止 fd leak 與 pipe EOF 延遲。 |
-| `fclose` | FILE cleanup | `src/builtin.c:304`、`379`、`439` | hexdump/crc32/memmap | builtin runtime | 關閉 `FILE*` | `fp` | 釋放 stdio resource。 |
+| 名稱 | 類型 | 直接效果 |
+|---|---|---|
+| `free_pipeline()` | Per-command cleanup | 每輪 command 後清掉 parser 配置的字串。 |
+| `free(line)` | Per-command cleanup | 釋放 Readline 回傳的輸入字串。 |
+| `shell_cleanup()` | Program cleanup | 釋放 Shell history、清除 Readline history。 |
+| `close()` | FD cleanup | 關閉 pipe fd 或 redirection fd。 |
+| `fclose()` | FILE cleanup | 關閉 built-in 工具開啟的檔案。 |
 
 ---
 
-### 4. Call Graph
+### 5. Built-in Command Table
 
-#### Initialization Chain
+#### Direct Observation
+
+`builtin.c` 使用 `BuiltinEntry builtins[]`：
+
+| Command | Function | 影響 Shell 狀態 | 說明 |
+|---|---|---|---|
+| `cd` | `builtin_cd()` | 是 | 使用 `chdir()` 改變 Shell cwd，成功前記錄 `OLDPWD`。 |
+| `pwd` | `builtin_pwd()` | 否 | 使用 `getcwd()` 印出目前目錄。 |
+| `exit` | `builtin_exit()` | 是 | 設定 `g_shell.running = 0`。 |
+| `quit` | `builtin_exit()` | 是 | `exit` alias。 |
+| `help` | `builtin_help()` | 否 | 走訪 `builtins[]` 印出指令說明。 |
+| `history` | `builtin_history()` | 否 | 顯示 `g_shell.history`。 |
+| `clear` | `builtin_clear()` | 否 | 輸出 ANSI 清畫面序列。 |
+| `hexdump` | `builtin_hexdump()` | 否 | 開檔讀 binary，輸出 hex + ASCII。 |
+| `crc32` | `builtin_crc32()` | 否 | 計算 CRC-32。 |
+| `memmap` | `builtin_memmap()` | 否 | 讀取 `/proc/iomem`。 |
+
+#### Dispatch Flow
+
+```text
+exec_builtin(cmd)
+  for each entry in builtins[]
+    if strcmp(cmd->argv[0], entry.name) == 0
+      return entry.func(cmd)
+  return -1
+```
+
+這種設計的好處是新增指令時集中在 table，不需要改很多分支判斷。
+
+---
+
+### 6. Parser Token Behavior
+
+#### Direct Observation
+
+| 輸入語法 | Parser 行為 | 後續 executor 行為 |
+|---|---|---|
+| `word` | 加入目前 `Cmd.argv`。 | built-in 或 `execvp()` 使用。 |
+| `'text with space'` | 單引號內完整當作同一個 word。 | 不再做變數展開。 |
+| `"text with space"` | 雙引號內完整當作同一個 word，支援 `\"` 和 `\\`。 | 不再做變數展開。 |
+| `|` | 切到下一個 `Cmd`。 | 建立 pipe 串接 stdout/stdin。 |
+| `< file` | 設定 `Cmd.in_file`。 | 外部指令 child 用 `open()` + `dup2()` 接到 stdin。 |
+| `> file` | 設定 `Cmd.out_file`，`out_append = 0`。 | 外部指令 child 用 `O_TRUNC` 開檔。 |
+| `>> file` | 設定 `Cmd.out_file`，`out_append = 1`。 | 外部指令 child 用 `O_APPEND` 開檔。 |
+| `&` | 設定 `Pipeline.background = 1`。 | parent 不等待 child。 |
+
+#### 目前程式碼中未觀察到
+
+- 環境變數展開，例如 `$HOME`。
+- 萬用字元展開，例如 `*.c`。
+- Command substitution，例如 `$(pwd)`。
+- Escape sequence 完整 Shell 相容性。
+- AST tree 或 token array；目前 parser 直接填 `Pipeline`。
+
+---
+
+### 7. Call Graph
+
+#### Startup Chain
 
 ```text
 OS starts ./fwsh
   -> main()
   -> shell_init()
-       -> sigemptyset(&sa.sa_mask)
-       -> sa.sa_flags = SA_RESTART
+       -> sigemptyset()
        -> sigaction(SIGCHLD, sigchld_handler)
        -> sigaction(SIGINT, sigint_handler)
        -> sigaction(SIGTSTP, SIG_IGN)
        -> g_shell.running = 1
-       -> print banner
+       -> printf banner
        -> rl_bind_key('\t', rl_complete)
   -> shell_run()
 ```
 
-#### Runtime Chain: REPL
+#### REPL Chain
 
 ```text
 shell_run()
-  while (g_shell.running)
-    -> build_prompt(prompt)
-    -> line = readline(prompt)
-    -> if line == NULL: print exit and break
-    -> trim leading whitespace
-    -> if empty: free(line), continue
-    -> add_history(trimmed)
-    -> idx = g_shell.hist_head % MAX_HISTORY
-    -> free(g_shell.history[idx])
-    -> g_shell.history[idx] = strdup(trimmed)
-    -> update hist_head/hist_count
-    -> Pipeline pipeline = zeroed stack object
-    -> parse_line(trimmed, &pipeline)
-       -> if 0: execute_pipeline(&pipeline)
-    -> free_pipeline(&pipeline)
-    -> free(line)
+  while g_shell.running:
+    build_prompt(prompt)
+    line = readline(prompt)
+    if line == NULL:
+      print exit
+      break
+    trim leading whitespace
+    if empty:
+      free(line)
+      continue
+    add_history(trimmed)
+    save to g_shell.history ring
+    memset(&pipeline, 0, sizeof(pipeline))
+    if parse_line(trimmed, &pipeline) == 0:
+      execute_pipeline(&pipeline)
+    free_pipeline(&pipeline)
+    free(line)
 ```
 
-#### Runtime Chain: Parser
-
-```text
-parse_line(line, pipeline)
-  -> Lexer lex = { input=line, pos=0 }
-  -> memset(pipeline, 0)
-  -> cur = &pipeline->cmds[0]
-  -> loop:
-       skip_whitespace
-       c = input[pos]
-       '\0' or '\n' -> finish
-       '|' -> cmd_idx++, bounds check, switch cur
-       '&' -> pipeline->background = 1
-       '<' -> read filename word, cur->in_file = strdup(wordbuf)
-       '>' -> optional second '>' sets out_append, read filename, cur->out_file = strdup(wordbuf)
-       word -> read_word, cur->argv[cur->argc++] = strdup(wordbuf), argv NULL terminate
-  -> pipeline->ncmds = cmd_idx + 1
-  -> trim trailing empty command if input ends after pipe
-  -> return 0
-```
-
-#### Runtime Chain: Executor
+#### Single Foreground Built-in Chain
 
 ```text
 execute_pipeline(pipeline)
-  -> if ncmds == 0: return 0
-  -> if single foreground command and builtin:
-       return exec_builtin(cmd)
-
-  -> npipes = ncmds - 1
-  -> create all pipes
-  -> for each Cmd:
-       if argc == 0: continue
-       pid = fork()
-       child:
-         if i > 0: dup2(previous pipe read end, STDIN_FILENO)
-         if i < npipes: dup2(current pipe write end, STDOUT_FILENO)
-         close all pipe fds
-         if builtin: _exit(exec_builtin(cmd))
-         exec_external(cmd)
-           -> setup_redirections(cmd)
-           -> execvp(argv[0], argv)
-           -> on failure: _exit(127)
-       parent:
-         store pid
-  -> parent close all pipe fds
-  -> if foreground:
-       waitpid(each pid)
-       return last command exit status
-     else:
-       print [background] pids
-       return 0
+  if ncmds == 1 and background == 0:
+    cmd = &cmds[0]
+    if is_builtin(cmd->argv[0]):
+      return exec_builtin(cmd)
 ```
 
-#### Cleanup Chain
+這條路不 fork，因此 `cd` 和 `exit` 可以修改 parent Shell 狀態。
+
+#### External / Pipeline Chain
 
 ```text
-per-command cleanup:
-  shell_run
-    -> free_pipeline(&pipeline)
-       -> free argv[j]
-       -> free in_file/out_file
-       -> set pointers NULL and argc=0
-    -> free(line)
-
-program cleanup:
-  shell_run returns
-  -> main
-  -> shell_cleanup
-       -> for every history slot:
-            free(g_shell.history[i])
-            history[i] = NULL
-       -> rl_clear_history()
-  -> return 0
+execute_pipeline(pipeline)
+  create ncmds - 1 pipes
+  for each command:
+    pid = fork()
+    child:
+      if not first command:
+        dup2(previous pipe read end, STDIN_FILENO)
+      if not last command:
+        dup2(current pipe write end, STDOUT_FILENO)
+      close all pipe fds
+      if builtin:
+        _exit(exec_builtin(cmd))
+      else:
+        setup_redirections(cmd)
+        execvp(cmd->argv[0], cmd->argv)
+        _exit(127)
+    parent:
+      record pid
+  parent closes all pipe fds
+  if foreground:
+    waitpid(each child)
+  else:
+    print background pids
 ```
-
-#### Callback Chain
-
-```text
-Signal callback:
-  SIGCHLD -> sigchld_handler -> waitpid(-1, NULL, WNOHANG) loop
-  SIGINT  -> sigint_handler  -> write newline + rl_on_new_line + rl_replace_line + rl_redisplay
-  SIGTSTP -> SIG_IGN
-
-Builtin dispatch callback:
-  execute_pipeline / child path
-    -> is_builtin(argv[0])
-    -> exec_builtin(cmd)
-       -> builtins[i].func(cmd)
-          -> builtin_cd / builtin_pwd / builtin_exit / ...
-```
-
-#### Indirect Call Chain / Dispatch Table
-
-| Dispatch point | Table / function pointer | Target | Evidence |
-|---|---|---|---|
-| built-in command lookup | `builtins[]` | command name -> function pointer | `src/builtin.c:54-77` |
-| function pointer call | `builtins[i].func(cmd)` | `builtin_cd` / `builtin_pwd` / etc. | `src/builtin.c:91` |
-| signal delivery | `sigaction(..., sa.sa_handler = ...)` | `sigchld_handler` / `sigint_handler` / `SIG_IGN` | `src/shell.c:68-76` |
-| Readline key binding | `rl_bind_key('\t', rl_complete)` | Readline completion callback | `src/shell.c:90` |
-| external command replacement | `execvp(cmd->argv[0], cmd->argv)` | PATH-resolved program | `src/executor.c:97` |
-
----
-
-### 5. Struct / Resource Tracing
-
-#### `Cmd`
-
-##### # Direct Observation
-
-Defined at `include/shell.h:48-54`:
-
-| 欄位 | allocation / init | 使用位置 | ownership / lifetime |
-|---|---|---|---|
-| `argv[MAX_ARGS]` | `parse_line` 以 `strdup(wordbuf)` 填入；`Pipeline` 初始 `memset` 為 0 | `is_builtin`、`exec_builtin`、`execvp` | `Pipeline` 擁有 argv 字串；`free_pipeline` 釋放。 |
-| `argc` | `parse_line` 遞增 | parser bounds check、executor skip empty command、builtins argument handling | value state，跟 `Pipeline` stack object 同生命週期。 |
-| `in_file` | `<` 後 `strdup(wordbuf)` | `setup_redirections` `open(..., O_RDONLY)` | `Pipeline` 擁有；`free_pipeline` 釋放。 |
-| `out_file` | `>` / `>>` 後 `strdup(wordbuf)` | `setup_redirections` `open(..., flags, 0644)` | `Pipeline` 擁有；`free_pipeline` 釋放。 |
-| `out_append` | parser 看到 `>>` 時設 1 | `setup_redirections` 決定 `O_APPEND` 或 `O_TRUNC` | value state。 |
-
-#### `Pipeline`
-
-Defined at `include/shell.h:57-61`:
-
-| 欄位 | allocation / init | 使用位置 | ownership / lifetime |
-|---|---|---|---|
-| `cmds[MAX_PIPES]` | `shell_run` stack object，`memset` zero；parser 填入 | parser/executor/free_pipeline | struct 本身在 stack；內部字串由 `strdup` 配置。 |
-| `ncmds` | parser 結尾設定 | executor loops、free_pipeline loops | 決定 executor fork 數與 cleanup 範圍。 |
-| `background` | parser 看到 `&` 設 1 | executor 決定 wait 或 print background PIDs | 決定 parent 是否 `waitpid`。 |
-
-#### `ShellState`
-
-Defined at `include/shell.h:68-73`; global instance at `src/shell.c:25`:
-
-| 欄位 | allocation / init | 使用位置 | ownership / lifetime |
-|---|---|---|---|
-| `history[MAX_HISTORY]` | static zero-init；每次 command 用 `strdup(trimmed)` 寫入 | `builtin_history`、`shell_cleanup` | `g_shell` 擁有 history 字串；overwrite 前 free，exit 時全部 free。 |
-| `hist_count` | global initializer 0；shell_run 更新 | `builtin_history` | value state，最多 50。 |
-| `hist_head` | global initializer 0；shell_run 更新 | history ring write/read | value state，持續遞增。 |
-| `running` | `shell_init` 設 1；`builtin_exit` 設 0 | `shell_run` while condition | 控制 REPL lifecycle。 |
-
-#### Resource Tracing
-
-| Resource | allocation / init | owner | release timing |
-|---|---|---|---|
-| Readline `line` | `readline(prompt)` | `shell_run` | empty input 或 iteration 結尾 `free(line)`。 |
-| Pipeline strings | `parse_line` 中 `strdup` | `Pipeline` / caller `shell_run` | `free_pipeline`。 |
-| Shell history strings | `strdup(trimmed)` | `g_shell.history[]` | overwrite 前 free；`shell_cleanup` 全部 free。 |
-| Pipe fds | `pipe(pipes[i])` | parent creates; children inherit after fork | child closes all after dup2；parent closes all after fork loop；partial pipe failure closes already-created fds。 |
-| Redirection fds | `open(in_file/out_file)` | child process | after `dup2`, child `close(fd)`。 |
-| `FILE*` in builtins | `fopen` | builtin function | `fclose` before return on success path。 |
-| CRC table | static `crc32_table[256]` | process global | no release needed; built once and reused. |
-
-#### State Transition
-
-```text
-ShellState:
-  zero-initialized
-  -> shell_init: running=1
-  -> shell_run: history slots filled/overwritten
-  -> builtin_exit: running=0
-  -> shell_cleanup: history freed, Readline history cleared
-
-Pipeline:
-  zeroed stack object
-  -> parse_line fills cmds/background/ncmds
-  -> execute_pipeline consumes by reference
-  -> free_pipeline frees internal heap strings and resets ncmds=0
-
-Child process:
-  forked
-  -> dup2 pipe fds as needed
-  -> close inherited pipe fds
-  -> builtin in child or exec_external
-  -> _exit(status) or execvp replacement
-```
-
-#### Data Passing Path
-
-```text
-terminal input
-  -> readline returns heap line
-  -> trimmed pointer into line
-  -> add_history(trimmed)
-  -> g_shell.history[idx] = strdup(trimmed)
-  -> parse_line(trimmed, &pipeline)
-  -> Cmd.argv / in_file / out_file = strdup(wordbuf)
-  -> execute_pipeline(&pipeline)
-     -> builtin receives Cmd*
-     -> external receives argv via execvp
-     -> redirection receives filenames via open
-  -> free_pipeline(&pipeline)
-  -> free(line)
-```
-
-#### Callback Binding
-
-- Signal callbacks are bound in `shell_init` through `sigaction`.
-- Builtin callbacks are bound statically in `builtins[]`.
-- Readline tab completion is bound via `rl_bind_key('\t', rl_complete)`.
-
----
-
-### 6. Execution Trace
-
-#### Initialization Flow
-
-```text
-make all
-  -> compile src/*.c to obj/*.o
-  -> link fwsh with -lreadline
-
-./fwsh
-  -> main
-  -> shell_init
-       -> setup SIGCHLD/SIGINT/SIGTSTP
-       -> set running
-       -> print banner
-       -> enable Readline tab completion
-  -> shell_run
-```
-
-#### Runtime Flow
-
-```text
-User types command
-  -> readline
-  -> trim
-  -> history update
-  -> Pipeline zero-init
-  -> parse_line
-  -> execute_pipeline
-  -> free_pipeline
-  -> free line
-  -> next prompt unless g_shell.running == 0
-```
-
-#### Cleanup Flow
-
-```text
-exit command
-  -> execute_pipeline single foreground builtin
-  -> exec_builtin
-  -> builtin_exit
-  -> g_shell.running = 0
-  -> shell_run loop ends
-  -> shell_cleanup
-  -> main returns
-```
-
-#### Data Flow
-
-```text
-"cat input | grep x > out"
-  -> parser:
-       cmd[0].argv = ["cat", "input", NULL]
-       cmd[1].argv = ["grep", "x", NULL]
-       cmd[1].out_file = "out"
-       cmd[1].out_append = 0
-       ncmds = 2
-  -> executor:
-       pipe[0]
-       child 0 stdout -> pipe[0][1] -> execvp("cat", ...)
-       child 1 stdin  -> pipe[0][0], stdout -> open("out") -> execvp("grep", ...)
-       parent closes pipe and waits
-```
-
-#### Event Flow
-
-```text
-SIGINT
-  -> sigint_handler
-  -> newline + Readline redisplay
-
-SIGCHLD
-  -> sigchld_handler
-  -> waitpid(-1, WNOHANG) until no more exited child
-
-User & command
-  -> parse_line sets background=1
-  -> executor does not wait
-  -> prints child PIDs
-  -> later SIGCHLD handler reaps exited child
-```
-
-#### Ownership Transfer
-
-目前程式碼中沒有複雜 ownership transfer。可驗證的關係是：
-
-- `readline()` 回傳的 `line` ownership 交給 `shell_run`，由 `free(line)` 釋放。
-- `parse_line()` 以 `strdup()` 建立的字串 ownership 交給 `Pipeline`，由 `free_pipeline()` 釋放。
-- `execvp()` 成功後 child process image 被替換；原本在 child address space 的 heap 不再需要由 shell code 釋放。
-- Pipe fd 在 `fork()` 後被 parent/child 各自關閉；這是 fd lifecycle，不是 heap ownership。
 
 ---
 
@@ -568,18 +404,25 @@ User & command
 
 ### 1. Entry Point 行為
 
-#### # Direct Observation
+#### Direct Observation
 
-`fwsh` 的 entry point 是 `src/main.c:12` 的 `main()`。它沒有解析 argv，也沒有 batch/script mode。可驗證的流程只有：
+`main()` 沒有解析 command-line arguments，也沒有 script mode。它只負責 lifecycle：
 
-```text
-shell_init()
-shell_run()
-shell_cleanup()
-return 0
+```c
+shell_init();
+shell_run();
+shell_cleanup();
+return 0;
 ```
 
-這表示目前 `fwsh` 是互動式 shell。`Makefile:97-98` 的 `run` target 也是直接執行 `./fwsh`。
+這讓專案入口很容易追。真正的行為都在 shell、parser、executor、builtin 四個模組。
+
+#### 目前程式碼中未觀察到
+
+- `fwsh script.fws`
+- `fwsh -c "command"`
+- batch mode
+- command-line option parser
 
 ---
 
@@ -587,94 +430,183 @@ return 0
 
 #### Signal Callback
 
-`shell_init` 使用同一個 `struct sigaction sa` 依序設定：
+`shell_init()` 使用 `sigaction()` 註冊：
 
-- `SIGCHLD -> sigchld_handler`
-- `SIGINT -> sigint_handler`
-- `SIGTSTP -> SIG_IGN`
+| Signal | Handler | 行為 |
+|---|---|---|
+| `SIGCHLD` | `sigchld_handler` | 回收已結束 child。 |
+| `SIGINT` | `sigint_handler` | Ctrl+C 時清除輸入行，不讓 Shell 直接退出。 |
+| `SIGTSTP` | `SIG_IGN` | 忽略 Ctrl+Z，避免 Shell 自己被暫停。 |
 
-`sa.sa_flags = SA_RESTART`，表示某些被 signal 中斷的 syscall 可能被自動 restart。此處是直接 code observation；Readline 本身如何受影響需依 library 行為，無法只從本 code 完整確認。
+`sa.sa_flags = SA_RESTART`，表示部分被 signal 中斷的 system call 會自動重試。
 
-#### Builtin Dispatch Callback
+#### Built-in Callback
 
-`builtin.c` 的 `BuiltinEntry` 內含 function pointer：
+`builtins[]` 是靜態 dispatch table，每筆資料有：
 
 ```c
+const char* name;
 int (*func)(Cmd*);
+const char* desc;
 ```
 
-`exec_builtin` 逐筆比對 `builtins[i].name`，命中後呼叫 `builtins[i].func(cmd)`。目前 table 註冊的名稱是：`cd`、`pwd`、`exit`、`quit`、`help`、`history`、`clear`、`hexdump`、`crc32`、`memmap`。
+`exec_builtin()` 透過 function pointer 呼叫對應實作。
 
 #### Readline Callback
 
-`shell_init` 呼叫 `rl_bind_key('\t', rl_complete)`，把 Tab key 綁到 Readline 內建 completion function。此專案目前沒有自訂 completion function。
+`shell_init()` 呼叫：
+
+```c
+rl_bind_key('\t', rl_complete);
+```
+
+這把 Tab 綁到 GNU Readline 內建 completion function。目前程式碼中未觀察到自訂 completion callback。
 
 ---
 
 ### 3. Runtime Dispatch Flow
 
-#### Single Foreground Builtin
+#### Single Foreground Built-in
 
-`execute_pipeline` 特別處理「只有一個 command 且不是 background」的 builtin：
+執行：
 
-```text
-ncmds == 1 && !background
-  -> if argc == 0 return 0
-  -> if is_builtin(argv[0]) return exec_builtin(cmd)
+```bash
+cd /tmp
 ```
 
-這讓 `cd`、`exit` 這類需要改變 shell process state 的 command 在 parent shell 內執行，而不是 fork 後在 child 內執行。
+流程：
 
-#### Pipeline / Background / External
+```text
+parse_line -> Pipeline(ncmds=1)
+execute_pipeline
+  -> is_builtin("cd") == 1
+  -> exec_builtin(cmd)
+  -> builtin_cd()
+  -> chdir("/tmp")
+```
 
-只要是 pipeline、background，或不是 builtin，就進入 fork path。child 中仍會檢查 builtin；若是 builtin，child 直接 `_exit(exec_builtin(cmd))`。這代表 pipeline 中的 builtin 不會改變 parent shell 的 `cwd` 或 `running`。
+這條路沒有 `fork()`。原因是 `cd` 必須改 parent Shell 的 cwd。
 
-#### Redirection
+#### External Command
 
-目前 redirection 只在 `exec_external()` 內呼叫 `setup_redirections()`。因此：
+執行：
 
-- 外部命令支援 `<`、`>`、`>>`。
-- pipeline/background 中的 builtin 在 child path 直接 `exec_builtin(cmd)`，不會呼叫 `setup_redirections()`。
-- single foreground builtin 也不會呼叫 `setup_redirections()`。
+```bash
+ls -l
+```
 
-所以「builtin redirection」目前程式碼中未觀察到實作。若執行 `pwd > out`，parser 會記錄 `out_file`，但 single foreground builtin path 直接 `exec_builtin`，不會處理 `out_file`。這是可直接從 `execute_pipeline` 與 `exec_external` 的呼叫關係驗證的行為。
+流程：
+
+```text
+parse_line -> Pipeline(ncmds=1)
+execute_pipeline
+  -> is_builtin("ls") == 0
+  -> fork()
+  -> child execvp("ls", argv)
+  -> parent waitpid(child)
+```
+
+#### Pipeline
+
+執行：
+
+```bash
+cat log.txt | grep error | wc -l
+```
+
+流程：
+
+```text
+parse_line -> Pipeline(ncmds=3)
+execute_pipeline
+  -> pipe[0], pipe[1]
+  -> fork child 0: cat
+  -> fork child 1: grep
+  -> fork child 2: wc
+  -> parent closes all pipe fds
+  -> parent waitpid all children
+```
+
+#### Background
+
+執行：
+
+```bash
+sleep 10 &
+```
+
+流程：
+
+```text
+parse_line -> background = 1
+execute_pipeline
+  -> fork child
+  -> parent does not wait
+  -> print [background] pid
+child exits later
+  -> kernel sends SIGCHLD
+  -> sigchld_handler reaps child
+```
 
 ---
 
-### 4. Indirect Call Path
-
-#### # Direct Observation
-
-本專案的 indirect dispatch 有三類：
-
-1. signal delivery 透過 `sigaction` 呼叫 handler。
-2. builtin command 透過 `builtins[]` function pointer 呼叫。
-3. external command 透過 `execvp` 將 child process 替換成 PATH 中的程式。
-
-目前程式碼中未觀察到 vtable、plugin registry、dynamic loading、dlopen 或 script-defined callback。
-
----
-
-### 5. Resource Lifecycle
+### 4. Resource Lifecycle
 
 #### Heap Resource
 
-`shell_run` 每輪都會建立 stack `Pipeline`，parser 將字串複製到 heap，executor 只讀取，最後 `free_pipeline` 釋放。Readline line buffer 由 `free(line)` 釋放。history ring 則跨 command 保存，直到被覆蓋或 `shell_cleanup`。
+| Resource | 建立位置 | 擁有者 | 釋放位置 |
+|---|---|---|---|
+| `line` from `readline()` | `shell_run()` | `shell_run()` | 每輪最後 `free(line)`。 |
+| `g_shell.history[idx]` | `shell_run()` 的 `strdup(trimmed)` | `g_shell` | 覆寫 slot 前 `free()`；結束時 `shell_cleanup()`。 |
+| `Cmd.argv[j]` | `parse_line()` 的 `strdup(wordbuf)` | `Pipeline` | `free_pipeline()`。 |
+| `Cmd.in_file` | `parse_line()` | `Pipeline` | `free_pipeline()`。 |
+| `Cmd.out_file` | `parse_line()` | `Pipeline` | `free_pipeline()`。 |
 
 #### File Descriptor Resource
 
-Executor 對 fd lifecycle 有明確處理：
-
-- pipe 建立失敗時，關閉已建立的 pipe fd。
-- child `dup2` 後關閉所有 pipe fd。
-- parent fork 完所有 child 後關閉所有 pipe fd。
-- redirection `open` 後 `dup2`，再 `close(fd)`。
-
-目前程式碼中未檢查 `dup2` return value；這是 error handling gap。
+| Resource | 建立位置 | 使用方式 | 釋放位置 |
+|---|---|---|---|
+| Pipe fd | `pipe(pipes[i])` | child 用 `dup2()` 接 stdin/stdout。 | child 和 parent 都 close。 |
+| Input file fd | `open(in_file, O_RDONLY)` | `dup2(fd, STDIN_FILENO)`。 | `dup2()` 後 close。 |
+| Output file fd | `open(out_file, flags, 0644)` | `dup2(fd, STDOUT_FILENO)`。 | `dup2()` 後 close。 |
 
 #### Process Resource
 
-Foreground command 使用 parent `waitpid(pids[i], &status, 0)` 等待。Background command 不 wait，僅印 PID，後續由 `SIGCHLD` handler 用 `waitpid(-1, WNOHANG)` 回收。
+| Resource | 建立位置 | 回收方式 |
+|---|---|---|
+| Foreground child | `fork()` | parent 在 executor 中 `waitpid(pid, &status, 0)`。 |
+| Background child | `fork()` | `SIGCHLD` handler 使用 `waitpid(-1, NULL, WNOHANG)`。 |
+
+#### FILE Resource
+
+| Built-in | 建立 | 釋放 |
+|---|---|---|
+| `hexdump` | `fopen(file, "rb")` | `fclose(fp)` |
+| `crc32` | `fopen(file, "rb")` | `fclose(fp)` |
+| `memmap` | `fopen("/proc/iomem", "r")` | `fclose(fp)` |
+
+---
+
+### 5. Ownership / Lifecycle Diagram
+
+```mermaid
+flowchart TD
+    A["readline()"] --> B["line heap buffer"]
+    B --> C["trimmed 指向 line 內部"]
+    C --> D["strdup(trimmed)<br/>history ring"]
+    C --> E["parse_line()"]
+    E --> F["strdup(wordbuf)<br/>Cmd argv / files"]
+    F --> G["execute_pipeline()<br/>只讀取 Pipeline"]
+    G --> H["free_pipeline()<br/>釋放 Cmd 內部字串"]
+    B --> I["free(line)"]
+    D --> J["shell_cleanup()<br/>釋放 history"]
+```
+
+重點：
+
+- `trimmed` 只是指向 `line` 內部，不是新配置的字串。
+- history 保存的是 `strdup(trimmed)`，所以 `line` 被 free 後 history 不會變成 dangling pointer。
+- executor 不保存 `Pipeline` 指標到下一輪，所以每輪結束可以安全 `free_pipeline()`。
 
 ---
 
@@ -682,144 +614,852 @@ Foreground command 使用 parent `waitpid(pids[i], &status, 0)` 等待。Backgro
 
 #### Parser Error
 
-| 錯誤點 | 回傳 | 後續 |
+| 錯誤 | 目前行為 | 回傳 |
 |---|---|---|
-| pipe 段數超過 `MAX_PIPES` | `-1` | `shell_run` 不呼叫 executor，仍呼叫 `free_pipeline`。 |
-| `<` 後沒有 filename | `-1` | 同上。 |
-| `>` / `>>` 後沒有 filename | `-1` | 同上。 |
-| argv 超過 `MAX_ARGS - 1` | `-1` | 同上。 |
+| 管線段數超過 `MAX_PIPES` | 印出 `fwsh: too many pipes`。 | `-1` |
+| `<` 後沒有檔名 | 印出 `fwsh: missing filename after '<'`。 | `-1` |
+| `>` 或 `>>` 後沒有檔名 | 印出 `fwsh: missing filename after '>'`。 | `-1` |
+| argv 超過上限 | 印出 `fwsh: too many arguments`。 | `-1` |
+
+`shell_run()` 只有在 `parse_line()` 回傳 0 時才呼叫 `execute_pipeline()`。不論解析成功或失敗，最後都會呼叫 `free_pipeline()`。
 
 #### Executor Error
 
-| 錯誤點 | 行為 |
+| 錯誤 | 目前行為 |
 |---|---|
-| `pipe()` 失敗 | `perror`，關閉已建立 pipes，return `-1`。 |
-| `fork()` 失敗 | `perror`，break fork loop；parent 關閉 pipes，等待已 fork 的 child。 |
-| redirection `open()` 失敗 | child 印錯，`setup_redirections` return `-1`，`exec_external` `_exit(1)`。 |
-| `execvp()` 失敗 | child 印錯，`_exit(127)`。 |
-| foreground wait | 回傳最後一個 forked child 的 exit status；若 child 非正常 exit，設 `-1`。 |
+| `pipe()` 失敗 | `perror("fwsh: pipe")`，關閉已建立 pipe，回傳 `-1`。 |
+| `fork()` 失敗 | `perror("fwsh: fork")`，停止繼續 fork，等待已 fork child。 |
+| `open()` input/output 失敗 | child 印出檔名與 `strerror(errno)`，用 `_exit(1)` 結束。 |
+| `execvp()` 失敗 | child 印出錯誤，用 `_exit(127)` 結束。 |
+| foreground child 非正常結束 | 最後一段 status 設為 `-1`。 |
 
-#### Builtin Error
+#### Built-in Error
 
-- `cd`：`HOME` / `OLDPWD` 缺失或 `chdir` 失敗時 return 1。
-- `hexdump`：缺參數、length invalid、`fopen` 失敗 return 1。
-- `crc32`：缺參數、`fopen` 失敗 return 1。
-- `memmap`：`/proc/iomem` 開啟失敗 return 1。
-- `exec_builtin` 沒找到 command 時 return `-1`，但正常呼叫前已由 `is_builtin` 或 table lookup 保護。
+| Built-in | 錯誤情境 | 回傳 |
+|---|---|---|
+| `cd` | `HOME` 不存在、`OLDPWD` 不存在、`chdir()` 失敗。 | `1` |
+| `hexdump` | 缺檔名、長度非法、`fopen()` 失敗。 | `1` |
+| `crc32` | 缺檔名、`fopen()` 失敗。 | `1` |
+| `memmap` | `/proc/iomem` 開啟失敗。 | `1` |
+| `exec_builtin` | 找不到 command。 | `-1` |
 
 ---
 
-### 7. 比較分析
+### 7. Important Behavior Differences
 
-#### Single foreground builtin vs child builtin
+#### Built-in vs External Command
 
-| 情境 | 執行位置 | 影響 parent shell state |
+| 項目 | Built-in | External |
 |---|---|---|
-| `cd /tmp` | parent shell process | 會改變 shell cwd。 |
-| `cd /tmp | pwd` | child process | 不會改變 parent shell cwd。 |
-| `exit` | parent shell process | 會設 `g_shell.running = 0`。 |
-| `exit | cat` 或 `exit &` | child process | 只會讓 child exit，不會直接停止 parent shell。 |
-
-差異原因可由 code 驗證：只有 `ncmds == 1 && !background` 的 builtin 走 direct `exec_builtin` path；其他都 fork。
+| 執行位置 | 單一前景時在 parent Shell；pipeline/background 時在 child。 | child process。 |
+| 查找方式 | `builtins[]` linear search。 | `execvp()` 依 `$PATH` 搜尋。 |
+| 是否能改 Shell 狀態 | 單一前景 built-in 可以，例如 `cd`、`exit`。 | 不行，因為外部程式在 child 中。 |
+| redirection 支援 | 目前不完整。 | 目前由 `setup_redirections()` 支援。 |
 
 #### `>` vs `>>`
 
-兩者都設定 `Cmd.out_file`，差異是 parser 看到第二個 `>` 時設 `out_append = 1`。executor 依該 flag 選擇：
-
-- `>`：`O_WRONLY | O_CREAT | O_TRUNC`
-- `>>`：`O_WRONLY | O_CREAT | O_APPEND`
-
-#### Builtin dispatch vs external dispatch
-
-| 類型 | 查找方式 | 執行方式 |
+| 語法 | Parser 設定 | Executor open flags |
 |---|---|---|
-| builtin | `builtins[]` linear search | function pointer `func(cmd)` |
-| external | PATH search by `execvp` | child process image replacement |
+| `> file` | `out_append = 0` | `O_WRONLY | O_CREAT | O_TRUNC` |
+| `>> file` | `out_append = 1` | `O_WRONLY | O_CREAT | O_APPEND` |
 
-使用原因只能依 code 說明：builtin 需要 shell 內部 state 或直接 C 函式；external 交給 POSIX process model 與 PATH resolution。
+#### Parent Built-in vs Child Built-in
 
-#### Resource management model
-
-`Pipeline` 是 stack object，但其內部字串是 heap allocation；history 是 shell-global heap strings；pipes/redirection 是 fd resource；builtins 的 `FILE*` 是 stdio resource。此專案沒有統一 allocator 或 RAII-style wrapper，cleanup 是分散在 `free_pipeline`、`shell_cleanup`、executor close path 與各 builtin function 內。
-
----
-
-### 8. Debug / Risk Analysis
-
-#### Potential Memory Leak
-
-- 正常成功 parse path：`parse_line` 配置的 `argv/in_file/out_file` 會由 `free_pipeline` 釋放。
-- 風險：`parse_line` 在某些 error return 前尚未設定 `pipeline->ncmds`。例如 too many pipes、missing filename、too many args 都可能在已 `strdup` 一些字串後 return `-1`；`shell_run` 會呼叫 `free_pipeline`，但 `free_pipeline` 以 `pipeline->ncmds` 控制 loop。若 `ncmds` 仍是 0，就不會釋放已配置的字串。這是從 `parse_line` 的 early return 與 `free_pipeline` loop 條件直接可見的 leak risk。
-- `strdup(trimmed)` 與 parser 中的 `strdup(wordbuf)` 都未檢查 NULL；記憶體不足時可能產生後續 NULL dereference 或不完整 state。
-
-#### Invalid Ownership Transfer
-
-- `readline` 回傳的 `line` 在 `shell_run` 中被 free；`trimmed` 只是指向 `line` 內部，不被保存為 raw pointer。保存到 history 前有 `strdup`，因此正常 path 沒有 dangling `trimmed`。
-- `Pipeline` 只持有 `strdup` 出來的字串，executor 不保存 pointer 到下一輪；正常 path 沒有跨 iteration dangling pointer。
-- child process fork 後會複製 address space；child `_exit` 或 execvp 後不需要回到 parent cleanup。
-
-#### Callback Misuse Risk
-
-- `sigint_handler` 呼叫 `rl_on_new_line`、`rl_replace_line`、`rl_redisplay`。這些 Readline calls 是否 async-signal-safe 無法從本 code 驗證；可直接確認的是 handler 內除了 `write` 之外還呼叫了 Readline API。
-- `sigchld_handler` 使用 `waitpid(-1, WNOHANG)`，可能回收任意已結束 child。`execute_pipeline` foreground path 也對特定 pid 呼叫 blocking `waitpid`。保守推論：若 foreground child exit 造成 SIGCHLD handler 先回收，後續 foreground `waitpid(pids[i], ...)` 可能失敗；目前程式碼沒有檢查 `waitpid` return value。
-
-#### Lifecycle Mismatch
-
-- Background job 沒有 job table；`execute_pipeline` 只印 PID，後續只能靠 `SIGCHLD` handler 回收，無法查詢或管理 job state。這不是 bug 本身，但和 shell 常見 job control 不同，需標示目前程式碼中未觀察到 job control。
-- Parser 支援 `background` flag，但 builtins 在 background/pipeline path 會在 child process 中執行，因此 `exit &` 或 `cd &` 不會改 parent shell state。這符合目前 code path，但可能與使用者直覺不同。
-- Builtin redirection 未在目前 code path 中實作，如 `help > file` 不會經過 `setup_redirections`。
-
-#### Concurrency Issue
-
-- 此專案沒有 threads；主要 concurrent behavior 是 parent/child processes 與 signal handler。
-- `crc32_table_ready` 與 `crc32_table` 是 static global，但 fwsh 沒有 multi-threaded command execution；目前程式碼中未觀察到同 process 內 concurrent builtin 執行。
-- signal handler 與 main execution flow 共享 process-level child state；如前述 `SIGCHLD` handler 與 foreground `waitpid` 可能競爭 child reaping。
-
-#### Parse / Compile Risk
-
-- `src/shell.c:137` 目前可見註解行以 `/*` 開頭但顯示為 `?/` 結尾，而不是標準 `*/`。
-- `src/builtin.c:282` 目前可見註解行也顯示為 `?/` 結尾。
-- 若檔案實際內容確實如此，會造成 C comment 未正常關閉並影響編譯。此報告未執行 build；此點僅依目前讀到的 source 標示為風險。
-
-#### File Descriptor / Error Handling Risk
-
-- `dup2` return value 未檢查；若 dup2 失敗，child 仍可能繼續執行 builtin 或 execvp，I/O routing 會不符合預期。
-- child path 關閉 pipe fd 的邏輯完整，但若 `fork` 中途失敗，只會 break，仍會等待已 fork 的 children；未 fork 的 command 不會執行。這是合理降級，但沒有把 fork failure status 明確傳回給 caller。
-
----
-
-## 補充：Command / Interface 對照
-
-### Builtin Table
-
-| Command | Function | 定義位置 | 直接影響 state |
-|---|---|---|---|
-| `cd` | `builtin_cd` | `src/builtin.c:111` | `chdir` 改變 shell process cwd；設定 `OLDPWD`。 |
-| `pwd` | `builtin_pwd` | `src/builtin.c:144` | 無，讀 cwd 後輸出。 |
-| `exit` / `quit` | `builtin_exit` | `src/builtin.c:160` | `g_shell.running = 0`。 |
-| `help` | `builtin_help` | `src/builtin.c:170` | 無，列印 `builtins[]` descriptions。 |
-| `history` | `builtin_history` | `src/builtin.c:188` | 無，讀 `g_shell.history`。 |
-| `clear` | `builtin_clear` | `src/builtin.c:203` | 無，輸出 ANSI clear sequence。 |
-| `hexdump` | `builtin_hexdump` | `src/builtin.c:237` | 開檔讀取並輸出 hex/ASCII。 |
-| `crc32` | `builtin_crc32` | `src/builtin.c:345` | 第一次建立 CRC table；開檔計算 checksum。 |
-| `memmap` | `builtin_memmap` | `src/builtin.c:405` | 讀 `/proc/iomem` 並依關鍵字上色輸出。 |
-
-### Parser Token Behavior
-
-| Syntax | Parser effect | Executor effect |
+| 指令 | 執行位置 | 結果 |
 |---|---|---|
-| `|` | 切到下一個 `Cmd` | 建立 pipe，前一段 stdout 接下一段 stdin。 |
-| `&` | `pipeline->background = 1` | parent 不 wait，印 background PIDs。 |
-| `< file` | `cmd->in_file = strdup(file)` | external command child open read-only, dup2 stdin。 |
-| `> file` | `cmd->out_file = strdup(file)`, `out_append = 0` | external command child open with `O_TRUNC`, dup2 stdout。 |
-| `>> file` | `cmd->out_file = strdup(file)`, `out_append = 1` | external command child open with `O_APPEND`, dup2 stdout。 |
-| single quotes | literal copy until closing `'` | no later expansion。 |
-| double quotes | copy until closing `"`, supports `\"` and `\\` | no variable expansion。 |
+| `cd /tmp` | parent Shell | Shell cwd 真的改變。 |
+| `cd /tmp | pwd` | `cd` 在 child | parent Shell cwd 不改變。 |
+| `exit` | parent Shell | `g_shell.running = 0`，Shell 結束。 |
+| `exit &` | child | child 結束，parent Shell 繼續。 |
 
 ---
 
-## 結論
+### 8. 相關 API 教學、比較與選擇依據
 
-`fwsh` 目前是一個 userspace interactive mini shell。核心 execution semantics 是：`main` 建立 shell lifecycle，`shell_run` 透過 GNU Readline 讀取一行輸入，`parser` 將文字轉成 `Pipeline`，`executor` 根據 builtin/pipeline/background 狀態決定 direct builtin 或 fork/pipe/exec，最後由 `free_pipeline` 與 `shell_cleanup` 清理 heap resources。
+本節把 `fwsh` 用到的 API 放回同類 API 裡比較。讀 API 時不要只背函式名稱，應該要能回答三個問題：
 
-可驗證的 callback chain 包含 signal handlers、Readline tab completion、以及 `builtins[]` function pointer dispatch。ownership 上，`readline` line、parser `strdup` 字串、history ring、pipe fd、redirection fd、builtin `FILE*` 都有各自 cleanup path。主要風險集中在 parser early error 的 heap cleanup、signal handler 與 foreground waitpid 的 child reaping 競爭、builtin redirection 未實作、`dup2` 未檢查，以及目前 source 中疑似未正常關閉的註解行。
+1. 這個 API 解決什麼問題？
+2. 和相似 API 差在哪裡？
+3. 為什麼這個專案選它？
+
+#### 8.1 行程建立：`fork()`、`vfork()`、`posix_spawn()`、`system()`
+
+| API | 作用 | 優點 | 限制或風險 | `fwsh` 選擇依據 |
+|---|---|---|---|---|
+| `fork()` | 複製目前行程，建立 child process。 | 最彈性。child 可以先改 fd、設定 redirection、接 pipe，再 `execvp()`。 | 初學者容易忘記 parent 和 child 都會從 `fork()` 後繼續執行。 | `fwsh` 需要在 child 執行前調整 stdin/stdout，所以選 `fork()`。 |
+| `vfork()` | 建立 child，但 child 暫時和 parent 共用位址空間，直到 exec 或 exit。 | 某些環境下比 `fork()` 輕量。 | 使用限制多，child 不能隨意改變記憶體或呼叫複雜函式，容易踩到未定義行為。 | 不適合教學版 Shell。`fwsh` 需要清楚、安全的流程。 |
+| `posix_spawn()` | 建立新行程並執行程式，可設定部分 file actions。 | 比 `fork()+exec` 更像高階封裝，在大型程式或受限環境可能較有效率。 | 對初學者較抽象，複雜 pipeline 仍要處理 file actions。 | `fwsh` 主要想展示 Shell 原理，因此保留 `fork()+execvp()`。 |
+| `system()` | 呼叫 `/bin/sh -c command` 執行一整串字串。 | 最簡單，一行就能跑外部命令。 | 會再交給別的 Shell 解析，安全性和可控性差，也看不到 parser/executor 細節。 | 不使用。`fwsh` 的目的就是自己實作解析和執行流程。 |
+
+教學重點：
+
+- `fork()` 回傳值有三種情況：child 看到 `0`，parent 看到 child pid，失敗看到 `< 0`。
+- `fork()` 後 parent 和 child 是兩個不同 process，各自有自己的記憶體空間。
+- child 繼承 parent 已開啟的 file descriptor，所以 pipe 和 redirection 才能在 `fork()` 後接線。
+
+```mermaid
+flowchart TD
+    A["parent: execute_pipeline()"] --> B{"fork() 回傳值"}
+    B -->|pid > 0| C["parent path<br/>記錄 child pid<br/>之後 waitpid()"]
+    B -->|pid == 0| D["child path<br/>dup2() 接 stdin/stdout<br/>execvp() 執行程式"]
+    B -->|pid < 0| E["error path<br/>perror() 並停止繼續 fork"]
+```
+
+#### 8.2 程式載入：`execvp()`、`execv()`、`execve()`、`execlp()`
+
+`exec` family 的共同概念是：在目前 process 內載入另一個程式。成功後，原本的程式碼不會繼續往下跑，因為 process image 已經被替換。
+
+| API | PATH 搜尋 | 參數格式 | 環境變數來源 | 適合情境 | `fwsh` 選擇依據 |
+|---|---|---|---|---|---|
+| `execvp(file, argv)` | 會 | `char* argv[]` | 沿用目前 process environment | Shell 執行使用者輸入的指令，例如 `ls`、`grep`。 | `parser` 已產生 `argv[]`，也需要依 `$PATH` 找指令，所以最適合。 |
+| `execv(path, argv)` | 不會 | `char* argv[]` | 沿用目前 process environment | 已經知道完整路徑，例如 `/bin/ls`。 | 不適合一般 Shell，因為使用者常輸入 `ls` 而不是 `/bin/ls`。 |
+| `execve(path, argv, envp)` | 不會 | `char* argv[]` | 呼叫者自行提供 `envp` | 需要精準控制環境變數。 | 目前 `fwsh` 沒有自訂 environment，因此不需要。 |
+| `execlp(file, arg0, ..., NULL)` | 會 | variadic argument list | 沿用目前 process environment | 參數數量在程式碼中固定時。 | Shell 的 argv 數量由使用者輸入決定，不適合 variadic 寫法。 |
+
+使用 `execvp()` 時，`argv[0]` 通常是指令名稱本身：
+
+```text
+輸入：grep error log.txt
+argv[0] = "grep"
+argv[1] = "error"
+argv[2] = "log.txt"
+argv[3] = NULL
+```
+
+為什麼 `argv` 一定要 `NULL` 結尾：`execvp()` 不知道陣列長度，只能一路讀到 `NULL` 才停止。這也是 `parse_line()` 每加入一個 argv 後會維持 `cur->argv[cur->argc] = NULL` 的原因。
+
+#### 8.3 行程等待：`wait()`、`waitpid()`、`waitid()`
+
+| API | 可以指定 PID | 可以非阻塞 | 回傳資訊 | 適合情境 | `fwsh` 選擇依據 |
+|---|---|---|---|---|---|
+| `wait(&status)` | 否 | 否 | 基本 exit status | 只要回收任意 child。 | 前景 pipeline 需要等指定 child，不夠精準。 |
+| `waitpid(pid, &status, options)` | 是 | 是，搭配 `WNOHANG` | 基本 exit status | Shell、server、需要管理多個 child 的程式。 | 同時適合 foreground wait 和 background reap。 |
+| `waitid()` | 是 | 是 | 較細的 `siginfo_t` | 需要更完整 child 狀態。 | 目前功能不需要那麼細。 |
+
+`fwsh` 有兩種等待情境：
+
+| 情境 | 使用方式 | 原因 |
+|---|---|---|
+| 前景指令 | `waitpid(pids[i], &status, 0)` | Shell 要等使用者指令跑完，再回到 prompt。 |
+| 背景指令 | `waitpid(-1, NULL, WNOHANG)` | Shell 不能卡住，要有 child 結束才回收。 |
+
+關鍵字補充：
+
+- `status`：不是單純的 exit code，而是包了更多狀態位元的整數。
+- `WIFEXITED(status)`：判斷 child 是否正常用 `exit()` 或 `_exit()` 結束。
+- `WEXITSTATUS(status)`：在 `WIFEXITED` 為真時，取出真正的 exit code。
+- `WNOHANG`：沒有可回收 child 時立刻回傳，不阻塞目前 process。
+
+#### 8.4 行程間通訊：`pipe()`、FIFO、`socketpair()`
+
+| API | 通訊方向 | 是否有檔名 | 適合情境 | `fwsh` 選擇依據 |
+|---|---|---|---|---|
+| `pipe(fd)` | 單向 | 否 | parent/child 或同源 child 間傳資料，例如 Shell pipeline。 | `A | B` 是單向資料流，`pipe()` 最直接。 |
+| FIFO / named pipe | 通常單向 | 是，存在檔案系統路徑 | 不相關 process 透過檔名溝通。 | Shell 每次 pipeline 都是臨時通道，不需要留下檔名。 |
+| `socketpair()` | 雙向 | 否 | 需要雙向 IPC，例如 client/server 互傳資料。 | Shell pipeline 只需要 stdout 到 stdin，雙向能力用不到。 |
+
+`pipe()` 建立兩個 fd：
+
+```text
+pipes[i][0] = read end
+pipes[i][1] = write end
+```
+
+記憶方式：
+
+- `0` 常聯想到 stdin，所以是讀端。
+- `1` 常聯想到 stdout，所以是寫端。
+
+#### 8.5 FD 複製：`dup()`、`dup2()`、`dup3()`、`fcntl(F_DUPFD)`
+
+| API | 可指定新 fd 編號 | 可設定 close-on-exec | 常見用途 | `fwsh` 選擇依據 |
+|---|---|---|---|---|
+| `dup(oldfd)` | 否 | 否 | 複製到目前最小可用 fd。 | 不能保證變成 `STDIN_FILENO` 或 `STDOUT_FILENO`。 |
+| `dup2(oldfd, newfd)` | 是 | 否 | 把檔案或 pipe 接到 stdin/stdout。 | `fwsh` 需要精準把 fd 接到 0 或 1，所以選它。 |
+| `dup3(oldfd, newfd, flags)` | 是 | 是，可用 `O_CLOEXEC` | Linux-specific，更精細控制。 | 專案偏 POSIX 教學，`dup2()` 較通用。 |
+| `fcntl(F_DUPFD)` | 可指定最小 fd | 可搭配其他 fcntl 操作 | 需要更細 fd 控制時。 | 對本專案過度複雜。 |
+
+`dup2(fd, STDOUT_FILENO)` 的直覺圖：
+
+```text
+呼叫前：
+  fd 1  -> terminal stdout
+  fd 4  -> output.txt
+
+dup2(4, 1) 後：
+  fd 1  -> output.txt
+  fd 4  -> output.txt
+
+close(4) 後：
+  fd 1  -> output.txt
+```
+
+為什麼 `dup2()` 後要 `close(fd)`：`fd` 和 `STDOUT_FILENO` 已經指向同一個 open file description。保留原 fd 沒必要，還可能造成 fd leak。
+
+#### 8.6 Signal API：`signal()`、`sigaction()`、`sigprocmask()`
+
+| API | 作用 | 優點 | 限制 | `fwsh` 選擇依據 |
+|---|---|---|---|---|
+| `signal(signum, handler)` | 設定簡單 signal handler。 | 寫法短。 | 不同系統語義可能不同，不能細部設定 flags。 | Shell 需要穩定 signal 行為，不選。 |
+| `sigaction(signum, &sa, NULL)` | 設定完整 signal handler。 | 可設定 `SA_RESTART`、mask、handler。 | 寫法較長。 | `fwsh` 需要明確控制 `SIGCHLD` 和 `SIGINT`。 |
+| `sigprocmask()` | 暫時阻擋或解除阻擋 signal。 | 可避免 signal 和主流程競爭。 | 使用錯誤會讓 signal 延遲或漏處理。 | 目前未使用，但可用來改善 foreground wait race。 |
+
+`fwsh` 使用 `sigaction()` 的原因：
+
+- `SIGCHLD`：child 結束時回收 zombie。
+- `SIGINT`：Ctrl+C 清除輸入行，不終止 Shell。
+- `SIGTSTP`：忽略 Ctrl+Z，避免 Shell 自己被暫停。
+- `SA_RESTART`：讓部分被 signal 中斷的 system call 自動重試。
+
+關鍵字補充：
+
+- `handler`：signal 發生時被呼叫的函式。
+- `async-signal-safe`：在 signal handler 中安全可呼叫的函式類型。`write()` 是，`printf()` 不是。
+- `signal mask`：暫時阻擋某些 signal 的集合。
+- `SA_RESTART`：讓部分 syscall 被 signal 中斷後自動重啟。
+
+#### 8.7 輸入 API：`read()`、`fgets()`、`getline()`、`readline()`
+
+| API | 行編輯 | History | 記憶體管理 | 適合情境 | `fwsh` 選擇依據 |
+|---|---|---|---|---|---|
+| `read()` | 無 | 無 | 呼叫者提供 buffer。 | 系統層級、socket、raw input。 | 太底層，要自己處理退格、方向鍵。 |
+| `fgets()` | 無 | 無 | 呼叫者提供 buffer。 | 讀文字檔或簡單 stdin。 | 可用，但互動 Shell 體驗差。 |
+| `getline()` | 無 | 無 | 可自動調整 buffer。 | 讀長文字行。 | 仍沒有行編輯和 history。 |
+| `readline()` | 有 | 可搭配 `add_history()` | 回傳 heap 字串，caller 要 `free()`。 | 互動式 Shell。 | `fwsh` 需要 Tab、上下鍵、Ctrl+R，所以選 Readline。 |
+
+使用 `readline()` 的代價是需要連結 `-lreadline`，並安裝 `libreadline-dev`。
+
+#### 8.8 檔案 I/O：`open()`、`fopen()`、`read()`、`fread()`
+
+`fwsh` 同時使用 POSIX fd API 和 C stdio API。兩者用途不同，不是誰一定比較好。
+
+| API 類型 | 代表 API | 操作單位 | 適合情境 | `fwsh` 使用位置 |
+|---|---|---|---|---|
+| POSIX fd | `open()`、`close()`、`dup2()` | file descriptor | 需要接 stdin/stdout、控制 fd 編號。 | redirection。 |
+| C stdio | `fopen()`、`fread()`、`fgets()`、`fclose()` | `FILE*` stream | 讀檔內容、逐行處理、緩衝 I/O。 | `hexdump`、`crc32`、`memmap`。 |
+
+為什麼 redirection 用 `open()`，不是 `fopen()`：
+
+- `dup2()` 需要的是 fd，不是 `FILE*`。
+- `open()` 直接回傳 fd，能精準接到 `STDIN_FILENO` 或 `STDOUT_FILENO`。
+
+為什麼 `hexdump` 和 `crc32` 用 `fopen()` / `fread()`：
+
+- 它們只是讀檔內容，不需要改變 stdin/stdout。
+- `fread()` 搭配固定大小 buffer 寫法簡潔，也有 stdio buffering。
+
+#### 8.9 字串與數字轉換：`atoi()`、`strtol()`、`strtoul()`
+
+| API | 錯誤檢查 | 支援進位 | 適合情境 | `fwsh` 選擇依據 |
+|---|---|---|---|---|
+| `atoi()` | 幾乎沒有 | 十進位 | 很簡單、不需要嚴格檢查的輸入。 | `exit [code]` 目前用 `atoi()`，但可改善。 |
+| `strtol()` | 可用 `endptr` 檢查 | base=0 可支援 `0x`、`0`、十進位 | 使用者輸入數字，需要檢查格式。 | `hexdump` 長度要支援 `0x40`，所以用 `strtol()`。 |
+| `strtoul()` | 可用 `endptr` 檢查 | 同上 | 無號整數，例如 size、address。 | 若後續支援位址或長度，可能比 `strtol()` 更合適。 |
+
+`hexdump src/main.c 0x40` 可用，是因為：
+
+```c
+max_bytes = strtol(cmd->argv[2], &endptr, 0);
+```
+
+`base = 0` 代表 C library 會自動判斷：
+
+- `0x40`：十六進位。
+- `064`：八進位。
+- `64`：十進位。
+
+#### 8.10 記憶體字串：`strdup()`、`malloc()` + `strcpy()`、指標借用
+
+| 方法 | 意義 | 優點 | 風險 | `fwsh` 選擇依據 |
+|---|---|---|---|---|
+| 指標借用 | 直接指向原本字串。 | 不配置記憶體。 | 原字串釋放後會 dangling pointer。 | 不適合 `Pipeline`，因為 `line` 每輪會 free。 |
+| `malloc()` + `strcpy()` | 自行配置並複製。 | 可完全控制大小與錯誤處理。 | 寫法較長，容易算錯長度。 | 可行，但重複樣板多。 |
+| `strdup()` | 配置新字串並複製內容。 | 簡潔，適合 argv 和檔名。 | 需要檢查 NULL，最後要 free。 | `fwsh` parser 用它保存 argv / redirection filename。 |
+
+重要觀念：
+
+- `trimmed` 指向 `line` 內部，所以不能直接存到 history。
+- `parse_line()` 讀到的 `wordbuf` 是 stack buffer，離開函式後不能再用。
+- 因此 history 和 `Pipeline` 都需要複製字串。
+
+#### 8.11 目錄與環境：`getcwd()`、`chdir()`、`getenv()`、`setenv()`
+
+| API | 作用 | `fwsh` 使用位置 |
+|---|---|---|
+| `getcwd(buf, size)` | 取得目前工作目錄。 | prompt、`pwd`、`cd` 更新 `OLDPWD`。 |
+| `chdir(path)` | 改變目前 process 的 cwd。 | `cd`。 |
+| `getenv("HOME")` | 讀環境變數。 | `cd` 無參數、prompt 顯示 `~`。 |
+| `setenv("OLDPWD", old, 1)` | 設定環境變數。 | `cd -` 需要上一個目錄。 |
+
+選擇依據：
+
+- `cd` 必須改 parent Shell 的 cwd，所以要在 single foreground built-in path 執行。
+- prompt 用 `getcwd()` 顯示目前目錄，讓使用者知道命令會在哪個路徑執行。
+- `OLDPWD` 放環境變數是為了符合一般 Shell 使用習慣。
+
+---
+
+### 9. 重點功能圖解
+
+本節用圖示把 `fwsh` 最重要的功能拆開看。圖中的箭頭代表「資料流」或「控制流程」，不是每一行 C 程式碼。
+
+#### 9.1 Parser 如何把文字變成 `Pipeline`
+
+輸入：
+
+```bash
+cat "boot log.txt" | grep 'CRC OK' >> result.txt &
+```
+
+```mermaid
+flowchart LR
+    A["raw line<br/>cat \"boot log.txt\" | grep 'CRC OK' >> result.txt &"] --> B["Lexer<br/>pos 從 0 往右掃"]
+    B --> C["read_word()<br/>cat"]
+    B --> D["read_word()<br/>boot log.txt"]
+    B --> E["遇到 |<br/>切換到下一個 Cmd"]
+    B --> F["read_word()<br/>grep"]
+    B --> G["read_word()<br/>CRC OK"]
+    B --> H["遇到 >><br/>out_append = 1"]
+    B --> I["read_word()<br/>result.txt"]
+    B --> J["遇到 &<br/>background = 1"]
+    C --> K["cmds[0].argv"]
+    D --> K
+    F --> L["cmds[1].argv"]
+    G --> L
+    I --> M["cmds[1].out_file"]
+    J --> N["Pipeline.background"]
+```
+
+解析後重點：
+
+```text
+ncmds = 2
+background = 1
+cmds[0].argv = ["cat", "boot log.txt", NULL]
+cmds[1].argv = ["grep", "CRC OK", NULL]
+cmds[1].out_file = "result.txt"
+cmds[1].out_append = 1
+```
+
+設計選擇：
+
+- 目前 parser 直接建立 `Pipeline`，沒有建立 AST。
+- 這對 mini shell 來說簡單直接。
+- 若未來要支援 `if`、`while`、`&&`、`||`，就可能需要 token array 或 AST。
+
+#### 9.2 Pipeline 如何用 pipe fd 串起來
+
+指令：
+
+```bash
+A | B | C
+```
+
+```mermaid
+flowchart LR
+    Aproc["child A<br/>stdout fd 1"] --> W0["pipe0 write<br/>pipes[0][1]"]
+    W0 --> R0["pipe0 read<br/>pipes[0][0]"]
+    R0 --> Bproc["child B<br/>stdin fd 0"]
+    Bproc --> W1["pipe1 write<br/>pipes[1][1]"]
+    W1 --> R1["pipe1 read<br/>pipes[1][0]"]
+    R1 --> Cproc["child C<br/>stdin fd 0"]
+```
+
+每個 child 的接線規則：
+
+| child | `dup2()` 動作 |
+|---|---|
+| 第一段 `A` | `dup2(pipes[0][1], STDOUT_FILENO)` |
+| 中間段 `B` | `dup2(pipes[0][0], STDIN_FILENO)` 與 `dup2(pipes[1][1], STDOUT_FILENO)` |
+| 最後段 `C` | `dup2(pipes[1][0], STDIN_FILENO)` |
+
+關鍵錯誤點：
+
+- child 接線後要關閉所有 pipe fd。
+- parent fork 完後也要關閉所有 pipe fd。
+- 只要還有任何 process 持有寫端，讀端就可能等不到 EOF。
+
+#### 9.3 Redirection 如何改變 stdout
+
+指令：
+
+```bash
+wc -c > count.txt
+```
+
+```mermaid
+flowchart TD
+    A["child process 啟動"] --> B["open('count.txt', O_WRONLY | O_CREAT | O_TRUNC)"]
+    B --> C["取得 fd，例如 fd=4"]
+    C --> D["dup2(4, STDOUT_FILENO)"]
+    D --> E["close(4)"]
+    E --> F["execvp('wc', argv)"]
+    F --> G["wc 寫 stdout"]
+    G --> H["實際寫入 count.txt"]
+```
+
+重點：
+
+- 程式本身仍以為自己在寫 stdout。
+- Shell 在 exec 前把 stdout 改接到檔案。
+- 這就是 redirection 的本質：不是改程式邏輯，而是改 fd 對應的目標。
+
+#### 9.4 Single foreground built-in 為何不 fork
+
+指令：
+
+```bash
+cd /tmp
+```
+
+```mermaid
+flowchart TD
+    A["execute_pipeline()"] --> B{"ncmds == 1<br/>且不是 background<br/>且是 built-in?"}
+    B -->|是| C["parent Shell 直接 exec_builtin()"]
+    C --> D["builtin_cd()"]
+    D --> E["chdir('/tmp')"]
+    E --> F["parent Shell cwd 改變"]
+    B -->|否| G["fork child path"]
+    G --> H["child 中執行<br/>不改 parent cwd"]
+```
+
+選擇依據：
+
+- `cd` 和 `exit` 會改 Shell 自己的狀態。
+- 如果放在 child 執行，parent 不會被改到。
+- 所以 executor 必須先判斷 single foreground built-in。
+
+#### 9.5 Background job 如何回收
+
+指令：
+
+```bash
+sleep 10 &
+```
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Parent as parent Shell
+    participant Child as child: sleep
+    participant Kernel
+
+    User->>Parent: sleep 10 &
+    Parent->>Child: fork()
+    Parent-->>User: print [background] pid, 回到 prompt
+    Child->>Child: execvp("sleep")
+    Child-->>Kernel: exit status ready
+    Kernel-->>Parent: SIGCHLD
+    Parent->>Parent: sigchld_handler()
+    Parent->>Kernel: waitpid(-1, NULL, WNOHANG)
+    Kernel-->>Parent: child reaped
+```
+
+重點：
+
+- 背景執行不是不管理 child。
+- parent 只是「不阻塞等待」。
+- child 結束後仍要回收，否則會形成 zombie process。
+
+#### 9.6 `hexdump` 如何輸出 Hex + ASCII
+
+```mermaid
+flowchart TD
+    A["hexdump file 0x40"] --> B["strtol('0x40', base=0)<br/>得到 64 bytes"]
+    B --> C["fopen(file, 'rb')"]
+    C --> D["fread(buf, 1, 16, fp)"]
+    D --> E["印 offset"]
+    E --> F["印 16 個 hex byte"]
+    F --> G["is printable?<br/>0x20 <= byte < 0x7F"]
+    G -->|是| H["印 ASCII 字元"]
+    G -->|否| I["印 '.'"]
+    H --> J{"是否達到 max_bytes 或 EOF?"}
+    I --> J
+    J -->|否| D
+    J -->|是| K["fclose(fp)"]
+```
+
+重點：
+
+- binary file 不能用文字行概念讀取，所以用 `"rb"`。
+- 每列 16 bytes 是 hexdump 常見格式，方便對齊觀察。
+- ASCII 欄位讓人快速看到 binary 裡是否藏有字串。
+
+#### 9.7 `crc32` 查表法如何運作
+
+```mermaid
+flowchart TD
+    A["第一次執行 crc32"] --> B{"crc32_table_ready?"}
+    B -->|否| C["crc32_build_table()<br/>建立 256 筆查找表"]
+    B -->|是| D["直接使用既有 table"]
+    C --> D
+    D --> E["crc = 0xFFFFFFFF"]
+    E --> F["fread 4096-byte chunk"]
+    F --> G["逐 byte 更新 crc"]
+    G --> H["index = (crc ^ byte) & 0xFF"]
+    H --> I["crc = table[index] ^ (crc >> 8)"]
+    I --> J{"還有資料?"}
+    J -->|是| F
+    J -->|否| K["crc ^= 0xFFFFFFFF"]
+    K --> L["印出 0x%08X"]
+```
+
+為什麼用查表法：
+
+- 逐 bit CRC 每個 byte 要跑 8 次 bit 運算。
+- 查表法先把 0 到 255 的結果預算好。
+- 實際計算每個 byte 只要 XOR、查表、右移，速度較穩定。
+
+---
+
+### 10. Actual Command Trace
+
+#### Example 1: `printf "abc" | wc -c > /tmp/fwsh_count.txt`
+
+Parser 結果：
+
+```text
+Pipeline.ncmds = 2
+Pipeline.background = 0
+
+cmds[0].argv = ["printf", "abc", NULL]
+cmds[1].argv = ["wc", "-c", NULL]
+cmds[1].out_file = "/tmp/fwsh_count.txt"
+cmds[1].out_append = 0
+```
+
+Executor 流程：
+
+```text
+pipe[0]
+fork child 0:
+  stdout -> pipe[0][1]
+  execvp("printf", ...)
+fork child 1:
+  stdin -> pipe[0][0]
+  stdout -> open("/tmp/fwsh_count.txt")
+  execvp("wc", ...)
+parent:
+  close pipe[0][0], pipe[0][1]
+  waitpid(child 0)
+  waitpid(child 1)
+```
+
+輸出檔內容：
+
+```text
+3
+```
+
+#### Example 2: `hexdump src/main.c 0x40`
+
+Parser 結果：
+
+```text
+Pipeline.ncmds = 1
+cmds[0].argv = ["hexdump", "src/main.c", "0x40", NULL]
+```
+
+Executor 流程：
+
+```text
+single foreground builtin
+  -> exec_builtin()
+  -> builtin_hexdump()
+```
+
+`hexdump` 內部流程：
+
+```text
+parse max_bytes by strtol(base=0)
+fopen(file, "rb")
+loop:
+  fread up to 16 bytes
+  print offset
+  print hex bytes
+  print ASCII preview
+fclose(fp)
+```
+
+#### Example 3: `sleep 1 &`
+
+Parser 結果：
+
+```text
+Pipeline.ncmds = 1
+Pipeline.background = 1
+cmds[0].argv = ["sleep", "1", NULL]
+```
+
+Executor 流程：
+
+```text
+fork child
+child:
+  execvp("sleep", ...)
+parent:
+  print [background] pid
+  return prompt immediately
+later:
+  SIGCHLD handler reaps child
+```
+
+---
+
+### 11. Debug / Risk Analysis
+
+本節列出目前已觀察到的錯誤、風險與修正方向。
+
+#### 11.1 缺少 Readline 開發套件
+
+| 項目 | 說明 |
+|---|---|
+| 現象 | `fatal error: readline/history.h: No such file or directory` |
+| 原因 | 系統缺少 `libreadline-dev`，只有 runtime library 不夠。 |
+| 解法 | 安裝 `libreadline-dev`。 |
+| 狀態 | 環境問題，非程式碼邏輯錯誤。 |
+
+#### 11.2 Pipe fd 未關閉會導致 pipeline 卡住
+
+| 項目 | 說明 |
+|---|---|
+| 現象 | 管線最後一段指令一直等待，例如 `printf abc | cat` 不結束。 |
+| 原因 | parent 或 child 仍持有 pipe 寫端，讀端收不到 EOF。 |
+| 目前處理 | child 在 `dup2()` 後關閉所有 pipe fd；parent fork 完後關閉所有 pipe fd。 |
+| 狀態 | 目前程式碼已有處理。 |
+
+#### 11.3 `cd` 在 child 中執行不會改 parent cwd
+
+| 項目 | 說明 |
+|---|---|
+| 現象 | 若 `cd` 走 fork path，下一次 prompt 仍在原目錄。 |
+| 原因 | child process 的 cwd 改變不會影響 parent Shell。 |
+| 目前處理 | 單一前景 built-in 直接在 parent Shell 執行。 |
+| 狀態 | 目前程式碼已有處理。 |
+
+#### 11.4 背景行程 zombie risk
+
+| 項目 | 說明 |
+|---|---|
+| 現象 | `sleep 10 &` 結束後可能殘留 zombie。 |
+| 原因 | parent 不等待背景 child，又沒有其他回收機制。 |
+| 目前處理 | `SIGCHLD` handler 用 `waitpid(-1, NULL, WNOHANG)` 回收。 |
+| 狀態 | 目前程式碼已有處理，但 foreground wait race 仍需注意。 |
+
+#### 11.5 Foreground wait 與 `SIGCHLD` handler 的競爭
+
+| 項目 | 說明 |
+|---|---|
+| 現象 | handler 用 `waitpid(-1, ...)`，可能回收 foreground child。 |
+| 原因 | `-1` 代表任意 child，不區分前景與背景。 |
+| 風險 | executor 後續 `waitpid(pids[i], ...)` 可能遇到 `ECHILD`。 |
+| 建議 | foreground 執行期間 block `SIGCHLD`，或建立 job table，或檢查 `waitpid()` 回傳值。 |
+| 狀態 | 目前是風險點。 |
+
+#### 11.6 Parser early error cleanup 風險
+
+| 項目 | 說明 |
+|---|---|
+| 現象 | parser 中途錯誤時，已 `strdup()` 的字串可能未完整釋放。 |
+| 原因 | `free_pipeline()` 依 `pipeline->ncmds` 釋放，但 `ncmds` 在成功結尾才設定。 |
+| 建議 | parser 建立每段 Cmd 時即更新 `ncmds`，或錯誤時直接清掉已配置資源。 |
+| 狀態 | 目前是記憶體管理風險。 |
+
+#### 11.7 `strdup()` 回傳值未檢查
+
+| 項目 | 說明 |
+|---|---|
+| 現象 | 記憶體不足時 `strdup()` 可能回傳 `NULL`。 |
+| 原因 | 目前程式碼直接把結果放進 argv 或 history。 |
+| 風險 | 後續 `execvp()`、`printf()` 或 cleanup 可能遇到 NULL pointer 行為。 |
+| 建議 | 封裝 `xstrdup()`，失敗時印錯並清理目前 pipeline。 |
+| 狀態 | 目前是低頻但應補的錯誤路徑。 |
+
+#### 11.8 `dup2()` 回傳值未檢查
+
+| 項目 | 說明 |
+|---|---|
+| 現象 | `dup2()` 若失敗，目前 child 仍可能繼續執行。 |
+| 原因 | `setup_redirections()` 和 pipe 接線處沒有檢查 `dup2()` 回傳值。 |
+| 風險 | 指令實際 I/O 方向和使用者預期不同。 |
+| 建議 | 每次 `dup2()` 都檢查 `< 0`，失敗時印錯並 `_exit(1)`。 |
+| 狀態 | 目前是 error handling gap。 |
+
+#### 11.9 Built-in redirection 尚未實作完整
+
+| 項目 | 說明 |
+|---|---|
+| 現象 | `pwd > out.txt` 不會走外部指令的 redirection path。 |
+| 原因 | `setup_redirections()` 只在 `exec_external()` 內呼叫。 |
+| 風險 | 使用者可能以為所有指令都支援同樣 redirection 語法。 |
+| 建議 | 抽出通用 redirection apply/restore，parent built-in 需要備份並還原 fd。 |
+| 狀態 | 目前是功能限制。 |
+
+#### 11.10 彩色 prompt 寬度問題
+
+| 項目 | 說明 |
+|---|---|
+| 現象 | 使用 ANSI color code 後，游標位置或 Backspace 顯示可能錯亂。 |
+| 原因 | Readline 需要知道哪些字元不可見。 |
+| 目前處理 | 用 `\001` 和 `\002` 包住不可見 color code。 |
+| 狀態 | 目前程式碼已有處理。 |
+
+#### 11.11 建置警告：`src/*.c` 在 C 註解內
+
+| 項目 | 說明 |
+|---|---|
+| 現象 | `warning: "/*" within comment`。 |
+| 原因 | C 註解中出現 `/*.c`，編譯器看到 `/*` 會提醒。 |
+| 建議 | 改寫註解字串，避開 `/*`。 |
+| 狀態 | 不影響執行，但影響建置乾淨度。 |
+
+#### 11.12 `strncpy()` prompt 截斷警告
+
+| 項目 | 說明 |
+|---|---|
+| 現象 | `warning: '__builtin_strncpy' output may be truncated`。 |
+| 原因 | `display_cwd` 最多 512 bytes，極長路徑會被截斷。 |
+| 風險 | prompt 顯示不完整。 |
+| 建議 | 改用 `snprintf()` 或 safe copy helper，保證 NUL 結尾並清楚標示截斷。 |
+| 狀態 | 不影響一般執行，是品質改善點。 |
+
+---
+
+### 12. API Usage Notes
+
+#### `parse_line()`
+
+呼叫者責任：
+
+1. 提供已配置的 `Pipeline*`。
+2. 確保使用前初始化或讓 `parse_line()` 內部 `memset()`。
+3. 使用後呼叫 `free_pipeline()`。
+
+典型用法：
+
+```c
+Pipeline pipeline;
+memset(&pipeline, 0, sizeof(pipeline));
+
+if (parse_line(line, &pipeline) == 0) {
+  execute_pipeline(&pipeline);
+}
+
+free_pipeline(&pipeline);
+```
+
+重要注意：
+
+- `parse_line()` 會配置 heap 字串。
+- `Pipeline` 本身通常在 stack 上，不由 `free_pipeline()` 釋放。
+- 錯誤路徑目前有 cleanup 風險，後續可改善。
+
+#### `execute_pipeline()`
+
+呼叫者責任：
+
+1. 傳入已由 parser 填好的 `Pipeline`。
+2. 不要在 executor 執行期間修改 `Pipeline`。
+3. executor 回傳後再 `free_pipeline()`。
+
+回傳值：
+
+- `0` 通常代表成功。
+- 外部指令前景執行時，回傳最後一段 command 的 exit status。
+- 系統呼叫失敗可能回傳 `-1`。
+
+重要注意：
+
+- 單一前景 built-in 不 fork。
+- pipeline/background built-in 會在 child 中執行。
+- redirection 目前只完整套用在 external command path。
+
+#### `exec_builtin()`
+
+呼叫者責任：
+
+1. 傳入 `Cmd*`，且 `cmd->argv[0]` 必須有效。
+2. 通常先用 `is_builtin()` 判斷。
+
+回傳值：
+
+- built-in 自己定義的 exit status。
+- 找不到指令時回傳 `-1`。
+
+重要注意：
+
+- `exec_builtin()` 不複製 `Cmd`。
+- built-in 可讀取 `Cmd.argv`、`Cmd.argc`、redirection 欄位，但目前多數 built-in 不處理 redirection。
+
+---
+
+### 13. 目前未觀察到的能力
+
+以下不是 bug，而是目前版本尚未實作：
+
+| 能力 | 說明 |
+|---|---|
+| 環境變數展開 | `echo $HOME` 不會由 fwsh 自己展開。 |
+| 萬用字元展開 | `*.c` 不會被 fwsh 展成檔案清單。 |
+| Script mode | 無 `fwsh script.fws` 或 `fwsh -c`。 |
+| Job table | 沒有保存 background job 狀態。 |
+| `jobs` / `fg` / `bg` | 尚未實作完整工作控制。 |
+| Process group / terminal control | 尚未使用 `setpgid()`、`tcsetpgrp()`。 |
+| AST | Parser 直接填 `Pipeline`，沒有抽象語法樹。 |
+| Threads | 程式中未使用 pthread。 |
+| Network IPC | 未使用 socket。 |
+| Plugin / dynamic loading | 未使用 `dlopen()` 或 plugin registry。 |
+
+---
+
+### 14. 建議修正順序
+
+如果要繼續改善，建議依風險排序：
+
+1. 檢查所有 `dup2()` 回傳值。
+   這直接影響 I/O 正確性，修改範圍小。
+
+2. 修 parser early error cleanup。
+   這能讓錯誤路徑的記憶體管理更完整。
+
+3. 檢查 `strdup()` 回傳值。
+   記憶體不足不常見，但 C 程式應有明確錯誤路徑。
+
+4. 改善 `SIGCHLD` 與 foreground wait 的競爭。
+   這會碰到 signal mask 或 job table，範圍較大。
+
+5. 補 built-in redirection。
+   這會牽涉 parent fd 備份與還原，設計要小心。
+
+6. 清掉建置警告。
+   包含註解中的 `src/*.c`、`write()` 回傳值、`strncpy()` 截斷警告。
+
+7. 再考慮 Job Control、變數展開、萬用字元展開、腳本模式。
+   這些屬於功能擴充，不是目前核心穩定性的第一優先。
+
+---
+
+### 15. 總結
+
+`fwsh` 目前的 API 和模組分工清楚：
+
+- `shell.c` 管 lifecycle、REPL、signal 和 prompt。
+- `parser.c` 把字串轉成 `Pipeline`。
+- `executor.c` 把 `Pipeline` 轉成實際 process、pipe、fd 和 wait 行為。
+- `builtin.c` 用 dispatch table 實作內建指令。
+
+整體資料流是：
+
+```text
+terminal input
+  -> readline line
+  -> parse_line creates Pipeline
+  -> execute_pipeline consumes Pipeline
+  -> child process / builtin function
+  -> free_pipeline releases parser-owned strings
+  -> next REPL iteration
+```
+
+主要資源有四類：heap 字串、file descriptor、child process、`FILE*`。目前正常路徑大多有對應 cleanup，但錯誤路徑和部分邊界情境仍有改善空間，尤其是 parser early return、`dup2()` 檢查、`SIGCHLD` 和 foreground wait 的互動，以及 built-in redirection。
+
+從學習角度看，這份專案已經涵蓋 Linux Shell 最重要的幾個底層概念；從工程角度看，下一步應先把錯誤處理和資源清理補齊，再往 Job Control 或腳本語法擴充。

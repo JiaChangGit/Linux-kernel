@@ -1,12 +1,22 @@
 # Linux IPC Benchmark API / Architecture 技術分析報告
 
-本報告只依據 `/linux-ipc-benchmark` 目前實際存在的 source code、header、Makefile 與 scripts 進行分析。以下內容以既有 report 的「Codebase Trace」與「Architecture / API Technical Report」結構為基礎補強，避免套用外部設計假設。
+本報告聚焦在 `linux-ipc-benchmark` 的 API、callback chain、資料流與設計取捨。閱讀目標是：看完後可以知道每個 API 在哪裡被呼叫、為什麼選它、它和類似 API 差在哪裡，以及重點功能如何運作。
+
+分析範圍：
+
+- `kernel/mq_module.c`
+- `kernel/shm_module.c`
+- `user/benchmark.c`
+- `user/mq_demo.c`
+- `user/shm_demo.c`
+- `user/common.h`
+- `scripts/*.sh`
 
 ## 分析標記
 
-- `# Direct Observation`：可由目前 codebase 直接驗證。
-- `# Conservative Inference`：只依據呼叫關係或非常保守的執行語意推論，並明確標示。
-- 無法從目前內容確認的地方，會標示「目前程式碼中未觀察到」或「無法從現有內容確認」。
+- `# Direct Observation`：可從目前程式碼直接確認。
+- `# Conservative Inference`：根據呼叫關係與 Linux API 語意做保守推論。
+- `# Risk / TODO`：目前程式碼可觀察到的限制或待修項目。
 
 ---
 
@@ -18,1180 +28,657 @@
 
 | 類別 | 檔案 | 角色 |
 | --- | --- | --- |
-| Kernel source | `kernel/mq_module.c` | 實作 `/dev/mq_ipc` char device，使用 `kfifo`、`mutex`、`wait_queue` 作為 Message Queue IPC。 |
-| Kernel source | `kernel/shm_module.c` | 實作 `/dev/shm_ipc` char device，使用 `vmalloc` ring buffer，提供 syscall read/write 與 `mmap` 共享記憶體路徑。 |
-| Kernel build | `kernel/Makefile` | 建置 `mq_module.ko` 與 `shm_module.ko`。 |
-| User source | `user/benchmark.c` | 同時測試 MQ syscall、SHM syscall、SHM mmap 三條 runtime path。 |
-| User source | `user/mq_demo.c` | 對 `/dev/mq_ipc` 做小量 write/read demo。 |
-| User source | `user/shm_demo.c` | 對 `/dev/shm_ipc` 做 `mmap` ring buffer demo。 |
-| Header | `user/common.h` | 定義 user space 共用常數、device path、`shm_region_t` layout 與 `now_us()`。 |
-| User build | `user/Makefile` | 建置 `benchmark`、`mq_demo`、`shm_demo`。 |
-| Root build | `Makefile` | 提供 `kernel`、`user`、`clean` 等目標。 |
-| Script | `scripts/01_setup.sh` | 安裝依賴、建置 kernel/user、`insmod` modules、設定 device 權限。 |
-| Script | `scripts/02_demo.sh` | 檢查 device，執行 `mq_demo` 與 `shm_demo`，讀取 `/proc/*_stats`。 |
-| Script | `scripts/03_benchmark.sh` | 檢查 device 與 binary，執行 `user/benchmark`。 |
-| Script | `scripts/04_cleanup.sh` | `rmmod` modules、清理 build artifact、檢查 device/proc/module 是否移除。 |
+| Kernel source | `kernel/mq_module.c` | 建立 `/dev/mq_ipc`，使用 `kfifo`、`mutex`、`wait_queue` 實作 Message Queue。 |
+| Kernel source | `kernel/shm_module.c` | 建立 `/dev/shm_ipc`，使用 `vmalloc` ring buffer，提供 syscall 與 `mmap` 兩種路徑。 |
+| Kernel build | `kernel/Makefile` | 產生 `mq_module.ko` 與 `shm_module.ko`。 |
+| User source | `user/benchmark.c` | 建立 producer / consumer pthread，比較三條 IPC 路徑。 |
+| User source | `user/mq_demo.c` | 示範 `/dev/mq_ipc` 的小量 `write()` / `read()`。 |
+| User source | `user/shm_demo.c` | 示範 `/dev/shm_ipc` 的 `mmap()` 與 shared ring 操作。 |
+| Header | `user/common.h` | 定義 user-space 共用常數、device path、`shm_region_t`、`now_us()`。 |
+| Script | `scripts/01_setup.sh` | 安裝依賴、建置、載入 module、設定 device 權限。 |
+| Script | `scripts/02_demo.sh` | 逐步執行 MQ 與 SHM mmap demo。 |
+| Script | `scripts/03_benchmark.sh` | 執行吞吐量 benchmark。 |
+| Script | `scripts/04_cleanup.sh` | 卸載 module 並清理 build artifacts。 |
 
-#### Module / Component Relationship
+### 2. Component Relationship
 
 # Direct Observation
 
-```text
-scripts/01_setup.sh
-  -> make kernel/user
-  -> insmod kernel/mq_module.ko
-       -> mq_init()
-       -> /dev/mq_ipc + /proc/mq_stats
-  -> insmod kernel/shm_module.ko
-       -> shm_init()
-       -> /dev/shm_ipc + /proc/shm_stats
+```mermaid
+flowchart TD
+    setup["scripts/01_setup.sh"] --> buildK["make kernel"]
+    setup --> buildU["make user"]
+    setup --> insMQ["insmod mq_module.ko"]
+    setup --> insSHM["insmod shm_module.ko"]
 
-user/mq_demo.c / user/benchmark.c
-  -> open("/dev/mq_ipc")
-  -> write/read syscall
-  -> kernel/mq_module.c:g_fops
+    insMQ --> mqInit["mq_init()"]
+    mqInit --> devMQ["/dev/mq_ipc"]
+    mqInit --> procMQ["/proc/mq_stats"]
 
-user/shm_demo.c / user/benchmark.c
-  -> open("/dev/shm_ipc")
-  -> read/write syscall OR mmap()
-  -> kernel/shm_module.c:g_fops
+    insSHM --> shmInit["shm_init()"]
+    shmInit --> devSHM["/dev/shm_ipc"]
+    shmInit --> procSHM["/proc/shm_stats"]
+
+    bench["user/benchmark"] --> devMQ
+    bench --> devSHM
+    mqDemo["user/mq_demo"] --> devMQ
+    shmDemo["user/shm_demo"] --> devSHM
 ```
 
 # Conservative Inference
 
-`linux-ipc-benchmark` 的比較軸線是「同樣 64 bytes message」在三種 path 中的成本差異：MQ syscall、SHM syscall、SHM mmap。這個推論來自 `user/benchmark.c` 實際依序呼叫三種測試，而不是 README 敘述假設。
+專案的比較軸線不是「Linux 內建 MQ vs Linux 內建 SHM」，而是「同一個專案中自行實作的三條資料路徑」。因此報告中的效能解讀只應對應這份 codebase，不應直接推論所有 IPC API。
 
 ---
 
-### 2. Semantic Element Extraction（只列實際存在）
+## 第二階段：核心概念圖
 
-#### API / External Interface
+### 1. MQ syscall path
 
-# Direct Observation
+```mermaid
+sequenceDiagram
+    participant P as Producer user thread
+    participant V as VFS syscall layer
+    participant M as mq_module.c
+    participant Q as kfifo
+    participant C as Consumer user thread
 
-- `/dev/mq_ipc`
-  - 定義：`kernel/mq_module.c` 的 `MQ_DEVICE "mq_ipc"`。
-  - 建立：`mq_init()` 透過 `alloc_chrdev_region()`、`cdev_add()`、`class_create()`、`device_create()`。
-  - 使用：`user/mq_demo.c` 與 `user/benchmark.c` 透過 `open()`、`write()`、`read()`。
+    P->>V: write(fd, msg, 64)
+    V->>M: g_fops.write -> mq_write()
+    M->>M: copy_from_user(kb, msg, len)
+    M->>Q: kfifo_in(&g_fifo, kb, 64)
+    M->>M: wake_up_interruptible(g_rd_wq)
 
-- `/dev/shm_ipc`
-  - 定義：`kernel/shm_module.c` 的 `SHM_DEVICE "shm_ipc"`。
-  - 建立：`shm_init()` 透過 `alloc_chrdev_region()`、`cdev_add()`、`class_create()`、`device_create()`。
-  - 使用：`user/shm_demo.c` 與 `user/benchmark.c` 透過 `open()`、`write()`、`read()`、`mmap()`。
+    C->>V: read(fd, buf, 64)
+    V->>M: g_fops.read -> mq_read()
+    M->>Q: kfifo_out(&g_fifo, kb, 64)
+    M->>C: copy_to_user(buf, kb, 64)
+    M->>M: wake_up_interruptible(g_wr_wq)
+```
 
-- `/proc/mq_stats`
-  - 建立：`mq_init()` 呼叫 `proc_create("mq_stats", 0444, NULL, &g_proc_ops)`。
-  - callback：`mq_proc_open()` -> `single_open()` -> `mq_stats_show()`。
+重點：
 
-- `/proc/shm_stats`
-  - 建立：`shm_init()` 呼叫 `proc_create("shm_stats", 0444, NULL, &g_proc_ops)`。
-  - callback：`shm_proc_open()` -> `single_open()` -> `shm_stats_show()`。
+- 每筆訊息至少一次 `write()`、一次 `read()`。
+- 資料從 user 複製到 kernel，再從 kernel 複製回 user。
+- queue full/empty 時由 kernel wait queue 處理等待。
 
-#### Macro
+### 2. SHM syscall path
 
-# Direct Observation
+```mermaid
+sequenceDiagram
+    participant P as Producer user thread
+    participant V as VFS syscall layer
+    participant S as shm_module.c
+    participant R as g_shm ring buffer
+    participant C as Consumer user thread
 
-| Macro | 位置 | 用途 |
-| --- | --- | --- |
-| `MQ_DEVICE` | `kernel/mq_module.c` | char device 名稱 `mq_ipc`。 |
-| `MSG_SIZE` | `kernel/mq_module.c`、`kernel/shm_module.c`、`user/common.h` | 固定 message slot 大小 64 bytes。 |
-| `QUEUE_DEPTH` | `kernel/mq_module.c` | MQ FIFO slot 數 512。 |
-| `FIFO_SIZE` | `kernel/mq_module.c` | `MSG_SIZE * QUEUE_DEPTH`，供 `DEFINE_KFIFO` 使用。 |
-| `SHM_DEVICE` | `kernel/shm_module.c` | char device 名稱 `shm_ipc`。 |
-| `RING_CAPACITY` | `kernel/shm_module.c`、`user/common.h` | shared memory ring slot 數 512。 |
-| `SHM_BUF_SIZE` | `kernel/shm_module.c` | `PAGE_ALIGN(sizeof(struct shm_region))`，供 `vmalloc()` 與 `mmap()` size 檢查使用。 |
-| `SHM_MAP_SIZE` | `user/common.h` | user space `mmap()` 長度，對齊 `sizeof(shm_region_t)` 到 page 邊界。 |
-| `DEFAULT_COUNT` | `user/benchmark.c` | benchmark 預設 message count 200000。 |
-| `DEMO_N` | `user/mq_demo.c`、`user/shm_demo.c` | demo message 數量 8。 |
+    P->>V: write(fd, msg, 64)
+    V->>S: g_fops.write -> shm_write()
+    S->>S: spin_lock(g_spin)
+    S->>R: copy_from_user(data[head], msg, len)
+    S->>R: head = next
+    S->>S: spin_unlock(g_spin)
 
-#### Inline Function
+    C->>V: read(fd, buf, 64)
+    V->>S: g_fops.read -> shm_read()
+    S->>S: spin_lock(g_spin)
+    S->>R: memcpy(tmp, data[tail], 64)
+    S->>R: tail = next
+    S->>S: spin_unlock(g_spin)
+    S->>C: copy_to_user(buf, tmp, 64)
+```
 
-# Direct Observation
+重點：
 
-- `now_us()`
-  - 位置：`user/common.h`。
-  - 類型：`static inline double`。
-  - 使用：`user/benchmark.c` 的 `syscall_worker()`、`mmap_worker()`、`run_test()`。
-  - 行為：呼叫 `clock_gettime(CLOCK_MONOTONIC, &ts)`，回傳 microseconds。
+- 底層 storage 是 shared ring，但 user 還是透過 syscall 存取。
+- 此路徑仍有 user/kernel copy。
+- ring full 回 `-ENOSPC`，ring empty 回 `-EAGAIN`。
 
-#### Callback / Function Pointer / Operation Table
+### 3. SHM mmap path
 
-# Direct Observation
+```mermaid
+flowchart LR
+    subgraph Kernel
+        G["g_shm: vmalloc ring buffer"]
+        M["shm_mmap()"]
+        P1["vmalloc_to_pfn()"]
+        P2["remap_pfn_range()"]
+    end
 
-| 名稱 | 類型 | 位置 | 綁定內容 |
+    subgraph User
+        U["shm_region_t *shm"]
+        Prod["producer writes data[head]"]
+        Cons["consumer reads data[tail]"]
+    end
+
+    G --> M --> P1 --> P2 --> U
+    U --> Prod
+    U --> Cons
+```
+
+```text
+Ring state:
+
+  head = next write slot
+  tail = next read slot
+
+  empty: head == tail
+  full : (head + 1) % RING_CAPACITY == tail
+
+  data[0] data[1] data[2] ... data[511]
+     ^                       ^
+    tail                    head
+```
+
+重點：
+
+- `mmap()` 完成後，每筆訊息不再進 kernel。
+- producer 與 consumer 直接讀寫同一段 mapped pages。
+- 正確性依賴 `head/tail` 協定與 memory barrier。
+
+---
+
+## 第三階段：關鍵字與 API 速查
+
+### 1. Kernel / VFS 相關
+
+| 關鍵字 | English | 說明 | 本專案位置 |
 | --- | --- | --- | --- |
-| `g_fops` | `struct file_operations` | `kernel/mq_module.c` | `.open = mq_open`、`.release = mq_release`、`.write = mq_write`、`.read = mq_read`。 |
-| `g_proc_ops` | `struct proc_ops` | `kernel/mq_module.c` | `.proc_open = mq_proc_open`、`.proc_read = seq_read`、`.proc_lseek = seq_lseek`、`.proc_release = single_release`。 |
-| `g_fops` | `struct file_operations` | `kernel/shm_module.c` | `.open = shm_open`、`.release = shm_release`、`.write = shm_write`、`.read = shm_read`、`.mmap = shm_mmap`。 |
-| `g_proc_ops` | `struct proc_ops` | `kernel/shm_module.c` | `.proc_open = shm_proc_open`、`.proc_read = seq_read`、`.proc_lseek = seq_lseek`、`.proc_release = single_release`。 |
-| `syscall_worker` | pthread worker callback | `user/benchmark.c` | 傳給 `pthread_create()`，測試 `read/write` syscall path。 |
-| `mmap_worker` | pthread worker callback | `user/benchmark.c` | 傳給 `pthread_create()`，測試 user-space mmap ring path。 |
+| 虛擬檔案系統 | VFS, Virtual File System | Linux 將 `read()`、`write()` 等檔案操作轉派到不同檔案型態或裝置。 | `/dev/mq_ipc`、`/dev/shm_ipc` 的 syscall dispatch |
+| 字元裝置 | Character Device | 以 byte stream 或自訂語意提供 `open/read/write/mmap` 的裝置介面。 | 兩個 kernel module |
+| 裝置號 | Device Number, `dev_t` | kernel 用 major/minor 辨識裝置。 | `g_devno` |
+| `cdev` | Character Device Structure | 把 device number 與 `file_operations` 綁定。 | `g_cdev` |
+| `file_operations` | File Operation Table | VFS 呼叫 module callback 的 function pointer table。 | `g_fops` |
+| procfs | Process Filesystem | 用文字檔形式暴露 kernel 狀態。 | `/proc/mq_stats`、`/proc/shm_stats` |
+| seq_file | Sequential File Helper | 讓 procfs 輸出多行文字更穩定。 | `seq_printf()` |
 
-#### Linker / Compiler Annotation
+### 2. 記憶體與同步相關
 
-# Direct Observation
-
-- `module_init(mq_init)`、`module_exit(mq_exit)`：`kernel/mq_module.c`。
-- `module_init(shm_init)`、`module_exit(shm_exit)`：`kernel/shm_module.c`。
-- `MODULE_LICENSE("GPL")`、`MODULE_AUTHOR(...)`、`MODULE_DESCRIPTION(...)`：兩個 kernel module 皆有。
-- `volatile`：`struct shm_region` 與 `shm_region_t` 的 `head`、`tail` 欄位。
-
-目前程式碼中未觀察到 custom linker script、section attribute、`__init`、`__exit`、`__attribute__`。
-
-#### Conditional Compilation
-
-# Direct Observation
-
-目前 `kernel/*.c`、`user/*.c`、`user/common.h` 中未觀察到 `#ifdef` / `#if` 條件編譯控制主要執行路徑。
-
-#### Synchronization Primitive
-
-# Direct Observation
-
-- MQ kernel path：
-  - `DEFINE_MUTEX(g_lock)`：保護 `g_fifo` 的 `kfifo_in()` / `kfifo_out()`。
-  - `DECLARE_WAIT_QUEUE_HEAD(g_rd_wq)`：reader 等待 FIFO 有資料。
-  - `DECLARE_WAIT_QUEUE_HEAD(g_wr_wq)`：writer 等待 FIFO 有空間。
-  - `atomic64_t`：累積 enqueue/dequeue 與 latency 統計。
-  - `READ_ONCE()` / `WRITE_ONCE()`：存取 `st_last_enq_ts`。
-
-- SHM kernel syscall path：
-  - `spinlock_t g_spin`：保護 `g_shm->head/tail/data` 的 read/write syscall path。
-  - `smp_wmb()`：writer 更新 `head` 前的 memory ordering。
-  - `smp_rmb()`：reader 從 ring slot 複製資料前的 memory ordering。
-  - `atomic64_t`：累積 write/read 與 latency 統計。
-  - `READ_ONCE()` / `WRITE_ONCE()`：存取 `st_last_wr_ts`。
-
-- User benchmark/demo mmap path：
-  - `pthread_barrier_t`：benchmark 中讓 producer/consumer 同步起跑。
-  - `__sync_synchronize()`：user-space ring buffer 的 memory barrier。
-
-目前程式碼中未觀察到 futex、semaphore、rwlock、completion、workqueue、kernel thread。
-
-#### Memory Management Mechanism
-
-# Direct Observation
-
-- MQ：
-  - `DEFINE_KFIFO(g_fifo, char, FIFO_SIZE)`：static kernel FIFO buffer。
-  - `char kb[MSG_SIZE]`：`mq_write()` stack buffer。
-  - `char kb[MSG_SIZE]`：`mq_read()` stack buffer。
-  - `copy_from_user()` / `copy_to_user()`：user/kernel copy boundary。
-
-- SHM：
-  - `vmalloc(SHM_BUF_SIZE)`：配置 kernel ring buffer。
-  - `vfree(g_shm)`：釋放 kernel ring buffer。
-  - `mmap()` / `remap_pfn_range()` / `vmalloc_to_pfn()`：把 `vmalloc` backing pages 映射到 user VMA。
-  - `memcpy()`：kernel read path 與 user mmap path 使用固定 64 bytes slot copy。
-
-#### Execution Model / Event Dispatch
-
-# Direct Observation
-
-- Kernel char device dispatch：VFS 根據 `struct file_operations` dispatch `open/read/write/mmap/release`。
-- Procfs dispatch：procfs 根據 `struct proc_ops` dispatch `open/read/lseek/release`。
-- User benchmark dispatch：`run_test()` 依 `use_mmap` 選擇把 `mmap_worker` 或 `syscall_worker` 傳給 `pthread_create()`。
-
-#### Communication Mechanism
-
-# Direct Observation
-
-- MQ path：user `write()` -> kernel `kfifo_in()`；user `read()` -> kernel `kfifo_out()`。
-- SHM syscall path：user `write()` / `read()` 透過 `/dev/shm_ipc` 進入 kernel ring buffer。
-- SHM mmap path：user 直接讀寫 `shm_region_t` 的 `head/tail/data`，不經每筆 message syscall。
-
-#### Registration Mechanism
-
-# Direct Observation
-
-- char device registration：`alloc_chrdev_region()`、`cdev_init()`、`cdev_add()`、`class_create()`、`device_create()`。
-- proc registration：`proc_create()`。
-- module registration：`module_init()` / `module_exit()`。
-
-目前程式碼中未觀察到 ioctl command registration、netlink family、sysfs attribute、miscdevice、platform_driver registration。
+| 關鍵字 | English | 說明 | 本專案位置 |
+| --- | --- | --- | --- |
+| `kfifo` | Kernel FIFO | Linux kernel 提供的 FIFO helper。 | `mq_module.c` |
+| `vmalloc` | Virtual Allocation | 配置連續 kernel 虛擬位址，但實體頁面可不連續。 | `shm_module.c` |
+| VMA | Virtual Memory Area | user process 的一段虛擬記憶體區間。 | `shm_mmap()` |
+| PFN | Page Frame Number | 實體頁框編號，用於建立 page mapping。 | `vmalloc_to_pfn()` |
+| `remap_pfn_range` | Remap PFN Range | 把 PFN 映射進 user VMA。 | `shm_mmap()` |
+| `copy_from_user` | Copy From User | 從 user pointer 安全複製資料到 kernel。 | `mq_write()`、`shm_write()` |
+| `copy_to_user` | Copy To User | 從 kernel 複製資料到 user pointer。 | `mq_read()`、`shm_read()` |
+| `wait_queue` | Wait Queue | 讓 task 睡眠，等待條件成立後被喚醒。 | MQ full/empty |
+| `mutex` | Sleeping Lock | 可睡眠鎖，適合可能等待的 critical section。 | MQ `g_lock` |
+| `spinlock` | Spin Lock | 不睡眠，忙等取得鎖，適合非常短的 critical section。 | SHM syscall `g_spin` |
+| memory barrier | 記憶體屏障 | 控制讀寫順序，避免 CPU/編譯器重排。 | `smp_wmb()`、`smp_rmb()`、`__sync_synchronize()` |
+| cache line | 快取行 | CPU cache 的基本一致性單位，常見 64 bytes。 | `head/tail` padding |
+| false sharing | 快取偽共享 | 不同 CPU 修改同一 cache line 上不同資料，造成不必要同步成本。 | SHM ring layout |
 
 ---
 
-### 3. API / Macro Inventory（分類整理）
+## 第四階段：API Inventory 與選擇依據
 
-#### Initialization
+### 1. Module lifecycle API
 
-# Direct Observation
+| API / Macro | 位置 | 功能 | 類似 API / 寫法 | 選擇與注意事項 |
+| --- | --- | --- | --- | --- |
+| `module_init(fn)` | `mq_module.c`、`shm_module.c` | module 載入時呼叫 init function。 | built-in driver 可能用不同 initcall level | Loadable module 標準入口。 |
+| `module_exit(fn)` | `mq_module.c`、`shm_module.c` | module 卸載時呼叫 cleanup function。 | 無 cleanup 的 built-in driver 不一定需要 | 必須釋放 device、proc entry、memory。 |
+| `MODULE_LICENSE("GPL")` | 兩個 module | 宣告授權，影響 kernel symbol 使用與 taint。 | Proprietary 字串 | 使用 GPL 避免部分 symbol 使用限制。 |
+| `MODULE_DESCRIPTION()` | 兩個 module | module metadata。 | `MODULE_AUTHOR()`、`MODULE_VERSION()` | 方便 `modinfo` 查看。 |
 
-| 名稱 | 類型 | 定義位置 | 呼叫位置 / 來源 | 用途 | 關聯 data | Flow 影響 |
-| --- | --- | --- | --- | --- | --- | --- |
-| `mq_init` | module init function | `kernel/mq_module.c` | `module_init(mq_init)`，由 `insmod mq_module.ko` 觸發 | 初始化 MQ char device 與 proc stats | `g_fifo`、`g_lock`、`g_devno`、`g_cdev`、`g_class`、atomic stats | 建立 `/dev/mq_ipc` 與 `/proc/mq_stats`，使 MQ runtime path 可被 VFS/procfs dispatch。 |
-| `shm_init` | module init function | `kernel/shm_module.c` | `module_init(shm_init)`，由 `insmod shm_module.ko` 觸發 | 配置 SHM ring、初始化 char device 與 proc stats | `g_shm`、`g_spin`、`g_devno`、`g_cdev`、`g_class`、atomic stats | 建立 `/dev/shm_ipc`、`/proc/shm_stats`，並提供 mmap backing buffer。 |
-| `spin_lock_init(&g_spin)` | init API | `kernel/shm_module.c` | `shm_init()` | 初始化 SHM syscall path lock | `g_spin` | `shm_read()` / `shm_write()` 之後可保護 ring state。 |
-| `pthread_barrier_init` | pthread API | `user/benchmark.c` | `run_test()` | 讓 producer/consumer 同步起跑 | `pthread_barrier_t bar` | 減少 benchmark thread 起跑時間差。 |
-| `now_us()` | inline helper | `user/common.h` | `syscall_worker()`、`mmap_worker()`、`run_test()` | 量測 elapsed time | `struct timespec` | 影響 benchmark 統計，不影響 IPC data path。 |
+### 2. Character device registration API
 
-#### Registration
+| API | 本專案呼叫位置 | 做什麼 | 類似 API | 選擇依據 |
+| --- | --- | --- | --- | --- |
+| `alloc_chrdev_region()` | `mq_init()`、`shm_init()` | 動態配置 major/minor。 | `register_chrdev_region()` | 不固定 major number，避免與系統既有裝置衝突。 |
+| `cdev_init()` | `mq_init()`、`shm_init()` | 初始化 `struct cdev`，綁定 `file_operations`。 | `cdev_alloc()` | 本專案用 static/global `g_cdev`，所以直接 init。 |
+| `cdev_add()` | `mq_init()`、`shm_init()` | 將 cdev 加入 kernel。 | `misc_register()` | `cdev` 展示完整 char device 流程；`miscdevice` 較簡潔但隱藏部分細節。 |
+| `class_create()` | `mq_init()`、`shm_init()` | 建立 device class，供 udev 建立 `/dev/*`。 | 手動 `mknod` | 自動建立 `/dev/mq_ipc`、`/dev/shm_ipc` 較方便。 |
+| `device_create()` | `mq_init()`、`shm_init()` | 建立 device node。 | `device_create_with_groups()` | 本專案不需要 sysfs attribute group。 |
+| `device_destroy()` | `mq_exit()`、`shm_exit()` | 移除 device node。 | 無 | cleanup 必要步驟。 |
+| `cdev_del()` | `mq_exit()`、`shm_exit()` | 移除 cdev。 | 無 | cleanup 必要步驟。 |
+| `unregister_chrdev_region()` | `mq_exit()`、`shm_exit()` | 釋放 major/minor。 | 無 | cleanup 必要步驟。 |
 
-# Direct Observation
+教學重點：
 
-| 名稱 | 類型 | 定義 / 呼叫位置 | 呼叫來源 | 用途 | 關聯 data | Flow 影響 |
-| --- | --- | --- | --- | --- | --- | --- |
-| `alloc_chrdev_region` | kernel API | `mq_init()`、`shm_init()` | module init | 配置 device number | `g_devno` | 後續 `cdev_add()` 與 `device_create()` 依賴此值。 |
-| `cdev_init` | kernel API | `mq_init()`、`shm_init()` | module init | 將 `g_cdev` 綁定到 `g_fops` | `g_cdev`、`g_fops` | 建立 VFS indirect dispatch table。 |
-| `cdev_add` | kernel API | `mq_init()`、`shm_init()` | module init | 註冊 char device | `g_cdev`、`g_devno` | 讓 device operation 可被核心呼叫。 |
-| `class_create` | kernel API | `mq_init()`、`shm_init()` | module init | 建立 device class | `g_class` | `device_create()` 依賴。 |
-| `device_create` | kernel API | `mq_init()`、`shm_init()` | module init | 建立 `/dev/mq_ipc` 或 `/dev/shm_ipc` | `g_class`、`g_devno` | 對 user space 暴露 external interface。 |
-| `proc_create` | kernel API | `mq_init()`、`shm_init()` | module init | 建立 `/proc/mq_stats` 或 `/proc/shm_stats` | `g_proc_ops` | 提供 stats read callback chain。 |
-| `module_init` / `module_exit` | kernel macro | 兩個 module 檔案尾端 | kernel module loader | 綁定載入/卸載 entry | `mq_init/mq_exit`、`shm_init/shm_exit` | 決定 init/cleanup chain。 |
+```text
+alloc_chrdev_region()
+  -> cdev_init()
+  -> cdev_add()
+  -> class_create()
+  -> device_create()
+  -> user can open("/dev/xxx")
+```
 
-#### Execution Path
+### 3. `file_operations` callback
 
-# Direct Observation
+| Callback | MQ | SHM | 被誰呼叫 | 說明 |
+| --- | --- | --- | --- | --- |
+| `.open` | `mq_open` | `shm_open` | `open("/dev/...")` | 目前只回 0，沒有 per-open state。 |
+| `.release` | `mq_release` | `shm_release` | `close(fd)` | 目前只回 0。 |
+| `.write` | `mq_write` | `shm_write` | `write(fd, buf, len)` | producer path。 |
+| `.read` | `mq_read` | `shm_read` | `read(fd, buf, len)` | consumer path。 |
+| `.mmap` | 無 | `shm_mmap` | `mmap(fd)` | 只有 SHM module 提供 zero-copy setup。 |
 
-| 名稱 | 類型 | 定義位置 | 呼叫來源 | 用途 | 關聯 data | Flow 影響 |
-| --- | --- | --- | --- | --- | --- | --- |
-| `mq_write` | `file_operations.write` callback | `kernel/mq_module.c` | user `write(fd, buf, MSG_SIZE)` | 將 user buffer 複製進 `g_fifo` | `g_fifo`、`g_lock`、`g_wr_wq`、`g_rd_wq` | 若 FIFO 空間不足會 sleep；成功後喚醒 reader。 |
-| `mq_read` | `file_operations.read` callback | `kernel/mq_module.c` | user `read(fd, buf, MSG_SIZE)` | 從 `g_fifo` 複製 64 bytes 到 user | `g_fifo`、`g_lock`、`g_rd_wq`、`g_wr_wq` | 若 FIFO 無資料會依 blocking/nonblocking 行為等待或回錯。 |
-| `shm_write` | `file_operations.write` callback | `kernel/shm_module.c` | user `write(fd, buf, MSG_SIZE)` | 透過 syscall 將 user data 寫入 shared ring | `g_shm->head/tail/data`、`g_spin` | ring full 時回 `-ENOSPC`；成功更新 `head`。 |
-| `shm_read` | `file_operations.read` callback | `kernel/shm_module.c` | user `read(fd, buf, MSG_SIZE)` | 透過 syscall 從 shared ring 讀出 data | `g_shm->head/tail/data`、`g_spin` | ring empty 時回 `-EAGAIN`；成功更新 `tail`。 |
-| `shm_mmap` | `file_operations.mmap` callback | `kernel/shm_module.c` | user `mmap(fd)` | 將 `g_shm` backing pages 映射給 user | `g_shm`、`SHM_BUF_SIZE`、VMA | 建立 zero-copy runtime path 的 memory sharing。 |
-| `syscall_worker` | pthread worker | `user/benchmark.c` | `pthread_create()` | producer/consumer 透過 `write/read` 反覆傳訊 | `targ_t`、device fd | 執行 MQ syscall 或 SHM syscall benchmark。 |
-| `mmap_worker` | pthread worker | `user/benchmark.c` | `pthread_create()` | producer/consumer 直接操作 mmap ring | `targ_t`、`shm_region_t *` | 執行 SHM mmap benchmark。 |
+類似 API 比較：
 
-#### Lifecycle / Cleanup
-
-# Direct Observation
-
-| 名稱 | 類型 | 定義位置 | 呼叫來源 | 用途 | 關聯 data | Flow 影響 |
-| --- | --- | --- | --- | --- | --- | --- |
-| `mq_exit` | module exit function | `kernel/mq_module.c` | `rmmod mq_module` | 移除 proc、device、class、cdev、devno | `/proc/mq_stats`、`g_class`、`g_cdev`、`g_devno` | 結束 MQ external interface。 |
-| `shm_exit` | module exit function | `kernel/shm_module.c` | `rmmod shm_module` | 移除 proc、device、class、cdev、devno，釋放 `g_shm` | `g_shm`、`g_class`、`g_cdev`、`g_devno` | 結束 SHM interface 並釋放 backing memory。 |
-| `munmap` | libc API | `user/benchmark.c`、`user/shm_demo.c` | user cleanup | 解除 user VMA | `shm_region_t *shm` | 結束 mmap path 的 user mapping。 |
-| `close` | libc API | user programs | user cleanup | 關閉 device fd | `mqfd`、`shmfd` | 觸發 kernel `.release` callback，但目前 release 只回 0。 |
-| `scripts/04_cleanup.sh` | shell script | `scripts/04_cleanup.sh` | 手動執行 | 先卸載 `shm_module`，再卸載 `mq_module`，最後 `make clean` | kernel modules、build artifacts | 清理 runtime 與 build state。 |
-
-#### Memory Handling
-
-# Direct Observation
-
-| 名稱 | 類型 | 位置 | 呼叫來源 | 用途 | 關聯 data | Flow 影響 |
-| --- | --- | --- | --- | --- | --- | --- |
-| `DEFINE_KFIFO` | kernel macro | `kernel/mq_module.c` | static definition | 配置 MQ FIFO | `g_fifo` | MQ data queue 的 storage。 |
-| `kfifo_in` | kernel API | `mq_write()` | write callback | 寫入固定 64 bytes slot | `g_fifo` | 增加 FIFO data length。 |
-| `kfifo_out` | kernel API | `mq_read()` | read callback | 讀出固定 64 bytes slot | `g_fifo` | 減少 FIFO data length。 |
-| `vmalloc` | kernel API | `shm_init()` | module init | 配置 shared ring backing memory | `g_shm` | SHM syscall/mmap path 共用 storage。 |
-| `vfree` | kernel API | `shm_exit()` / init unwind | module cleanup | 釋放 `g_shm` | `g_shm` | 結束 shared ring lifetime。 |
-| `copy_from_user` | kernel API | `mq_write()`、`shm_write()` | write callback | 從 user buffer 複製到 kernel | user pointer、kernel buffer | user/kernel boundary；失敗回 `-EFAULT`。 |
-| `copy_to_user` | kernel API | `mq_read()`、`shm_read()` | read callback | 從 kernel 複製到 user buffer | kernel buffer、user pointer | user/kernel boundary；失敗回 `-EFAULT`。 |
-| `remap_pfn_range` | kernel API | `shm_mmap()` | mmap callback | 將 page frame 映射到 VMA | `g_shm`、VMA | 建立 user-space direct access。 |
-
-#### Synchronization
-
-# Direct Observation
-
-| 名稱 | 類型 | 位置 | 呼叫來源 | 用途 | 關聯 data | Flow 影響 |
-| --- | --- | --- | --- | --- | --- | --- |
-| `g_lock` | `struct mutex` | `kernel/mq_module.c` | `mq_write()`、`mq_read()` | 保護 `kfifo_in/out` | `g_fifo` | 防止 MQ FIFO 修改互相交錯。 |
-| `g_rd_wq` | wait queue | `kernel/mq_module.c` | `mq_read()` wait、`mq_write()` wake | reader 等待資料 | `g_fifo` | MQ read blocking semantics。 |
-| `g_wr_wq` | wait queue | `kernel/mq_module.c` | `mq_write()` wait、`mq_read()` wake | writer 等待空間 | `g_fifo` | MQ write blocking semantics。 |
-| `g_spin` | `spinlock_t` | `kernel/shm_module.c` | `shm_write()`、`shm_read()` | 保護 syscall path ring state | `g_shm` | SHM syscall path 不 sleep 等待，只回 error。 |
-| `smp_wmb` / `smp_rmb` | kernel barrier | `kernel/shm_module.c` | `shm_write()`、`shm_read()` | 控制 ring data/head/tail 可見性 | `g_shm->data/head/tail` | 降低 reader 看見 head 但 data 未完成的風險。 |
-| `__sync_synchronize` | compiler builtin | `user/benchmark.c`、`user/shm_demo.c` | mmap producer/consumer | user-space memory barrier | `shm_region_t` | 控制 mmap ring data/head/tail 可見性。 |
-| `pthread_barrier_wait` | pthread API | `user/benchmark.c` | worker start | 同步 producer/consumer 開始時間 | `targ_t.bar` | 影響 benchmark timing。 |
-
-#### Event Dispatch
-
-# Direct Observation
-
-| 名稱 | 類型 | 位置 | 呼叫來源 | 用途 | Flow 影響 |
-| --- | --- | --- | --- | --- | --- |
-| `struct file_operations g_fops` | operation table | 兩個 kernel module | VFS | dispatch device operations | user syscall 會間接進入 module callbacks。 |
-| `struct proc_ops g_proc_ops` | operation table | 兩個 kernel module | procfs | dispatch proc read operations | `cat /proc/*_stats` 會間接進入 stats callbacks。 |
-| `pthread_create(..., syscall_worker/mmap_worker, ...)` | callback dispatch | `user/benchmark.c` | `run_test()` | 選擇 benchmark worker | 決定 runtime path 是 syscall 或 mmap。 |
-
-#### Logging / Debug
-
-# Direct Observation
-
-- Kernel：
-  - `pr_info()`：module init/exit 成功訊息。
-  - `pr_err()`：init 失敗 unwind 相關錯誤訊息。
-  - `seq_printf()`：`mq_stats_show()` 與 `shm_stats_show()` 輸出 proc stats。
-
-- User / script：
-  - `printf()` / `puts()`：demo 與 benchmark 結果。
-  - `perror()`：user program open/mmap error。
-  - `system("cat /proc/mq_stats")`、`system("cat /proc/shm_stats")`：`user/benchmark.c` 與 demo 直接讀 proc stats。
-
-#### Error Handling
-
-# Direct Observation
-
-| Error | 來源 | 語意 |
+| 介面 | 適合用途 | 本專案是否使用 |
 | --- | --- | --- |
-| `-EFAULT` | `copy_from_user()` / `copy_to_user()` failure | user pointer copy 失敗。 |
-| `-EINTR` | `mq_write()` / `mq_read()` wait interrupted | blocking wait 被 signal 中斷。 |
-| `-EAGAIN` | `mq_read()` nonblock empty、`mq_read()` unexpected FIFO short read、`shm_read()` empty | 暫時不可讀或狀態不符合。 |
-| `-ENOSPC` | `shm_write()` ring full | syscall SHM ring 滿。 |
-| `-EINVAL` | read length < `MSG_SIZE`、`shm_mmap()` VMA size 過大 | caller 參數不符合固定 64 bytes / mapping size 要求。 |
-| `-ENOMEM` | `vmalloc()` failure、device/class error path | kernel resource allocation failure。 |
+| `read/write` | byte stream、簡單 request/response、容易用 shell 工具測 | 有 |
+| `ioctl` | 控制命令、設定參數、查詢 metadata | 無，目前不需要 command set |
+| `mmap` | 大量資料共享、zero-copy、使用者直接操作 buffer | 有，SHM path 核心 |
+| `poll/select/epoll` | 等待 fd 可讀可寫 | 無，MQ 用 kernel wait queue；SHM mmap 用 user polling |
 
-# Conservative Inference
+### 4. Procfs / stats API
 
-`user/benchmark.c` 的 retry loop 只針對 `EAGAIN`、`ENOSPC`、`EINTR` 重試；其他錯誤會跳出 loop，但 worker 沒有把錯誤傳回 `main()`。因此 benchmark 結果可能在 error path 下仍繼續統計，這是從目前控制流程推論出的風險。
+| API | 位置 | 功能 | 類似 API | 選擇依據 |
+| --- | --- | --- | --- | --- |
+| `proc_create()` | `mq_init()`、`shm_init()` | 建立 `/proc/mq_stats`、`/proc/shm_stats`。 | `debugfs_create_file()`、`sysfs_create_file()` | 這裡是教學用統計輸出，procfs 直覺、容易 `cat`。 |
+| `single_open()` | `mq_proc_open()`、`shm_proc_open()` | 建立一次性 seq_file。 | 手寫 `.read` | 避免手動處理 offset 與 partial read。 |
+| `seq_read()` | `g_proc_ops` | seq_file 標準 read。 | 手寫 read callback | 多行文字輸出較安全。 |
+| `seq_printf()` | stats show function | 輸出 key/value 統計。 | `snprintf` 到 buffer | seq_file 已處理 buffer 管理。 |
+| `remove_proc_entry()` | module exit | 移除 proc entry。 | `proc_remove()` | 目前程式使用 name-based remove。 |
+
+注意：
+
+- 目前 `proc_create()` 的 return value 沒有保存，也沒有檢查。
+- 若 proc entry 建立失敗，module 仍可能載入，但 `/proc/*_stats` 不存在。
+- 若要提高可靠性，應保存 `struct proc_dir_entry *`，失敗時走 cleanup。
+
+### 5. MQ data path API
+
+| API | 位置 | 功能 | 類似 API | 選擇依據 |
+| --- | --- | --- | --- | --- |
+| `DEFINE_KFIFO()` | `mq_module.c` global | 建立 static FIFO storage。 | `kfifo_alloc()`、手寫 ring | 固定大小、教學簡潔。 |
+| `kfifo_in()` | `mq_write()` | 將 bytes 放進 FIFO。 | `kfifo_put()` | 本專案一次放 64 bytes，不是一個 C object。 |
+| `kfifo_out()` | `mq_read()` | 從 FIFO 取出 bytes。 | `kfifo_get()` | 同上，一次取固定 bytes。 |
+| `kfifo_len()` | `mq_read()`、stats | 查已使用 bytes。 | 自行維護 count | 使用 helper 降低錯誤。 |
+| `kfifo_avail()` | `mq_write()`、stats | 查可用 bytes。 | 自行維護 free | 用於 full/backpressure 判斷。 |
+| `wait_event_interruptible()` | `mq_write()`、`mq_read()` | 條件不成立時睡眠，可被 signal 中斷。 | `wait_event()`、busy polling | IPC queue full/empty 時不浪費 CPU。 |
+| `wake_up_interruptible()` | `mq_write()`、`mq_read()` | 喚醒等待者。 | `wake_up()` | 搭配 interruptible wait。 |
+| `mutex_lock()` / `mutex_unlock()` | `mq_write()`、`mq_read()` | 保護 FIFO 操作。 | `spin_lock()` | wait queue path 可睡眠，mutex 語意清楚。 |
+
+選擇解釋：
+
+- MQ path 要呈現「由 kernel 管理 queue 與等待」。
+- `wait_queue` 比 busy polling 更適合一般 IPC queue，因為空或滿可能維持一段時間。
+- `mutex` 可以睡眠；若 critical section 可能延伸，使用上比 spinlock 安全。
+
+### 6. SHM memory mapping API
+
+| API | 位置 | 功能 | 類似 API | 選擇依據 |
+| --- | --- | --- | --- | --- |
+| `vmalloc()` | `shm_init()` | 配置 kernel virtual contiguous buffer。 | `kmalloc()`、`alloc_pages()` | 不要求實體連續，大小也比單一小物件大。 |
+| `vfree()` | `shm_exit()` | 釋放 `vmalloc` memory。 | `kfree()`、`free_pages()` | `vmalloc()` 必須搭配 `vfree()`。 |
+| `PAGE_ALIGN()` | `SHM_BUF_SIZE` | 將 shared region size 對齊 page。 | 手動 `(size + PAGE_SIZE - 1) & ...` | kernel helper 語意清楚。 |
+| `vmalloc_to_pfn()` | `shm_mmap()` | 把 vmalloc virtual address 轉 PFN。 | `virt_to_phys()` 不適合 vmalloc memory | `vmalloc` 實體頁不連續，必須逐頁轉。 |
+| `remap_pfn_range()` | `shm_mmap()` | 把 PFN 映射進 user VMA。 | `remap_vmalloc_range()`、`vm_insert_page()` | 手動逐頁映射，最能展示 PFN/VMA 關係。 |
+| `vm_flags_set()` | `shm_mmap()` | 設定 VMA flags。 | 直接改 `vma->vm_flags` | 新版 kernel 建議用 helper。 |
+
+類似 API 比較：
+
+| API | 適合情境 | 不選或可改用的原因 |
+| --- | --- | --- |
+| `kmalloc()` | 小型、需要實體連續或至少容易處理的 kernel buffer | 大 buffer 可能配置失敗；對 mmap 不一定方便。 |
+| `alloc_pages()` | 需要頁面為單位、可控制 order 的配置 | 需要自己管理 page life cycle。 |
+| `dma_alloc_coherent()` | 裝置 DMA coherent buffer | 本專案沒有硬體 DMA，不需要。 |
+| `remap_vmalloc_range()` | 直接把 vmalloc area 映射到 VMA | 可簡化程式；本專案保留手動 PFN loop 以便教學。 |
+| `vm_insert_page()` | 逐頁插入 `struct page` | 也可做 page-based mapping，但本專案已用 PFN path。 |
+
+### 7. SHM synchronization API
+
+| API | 位置 | 功能 | 類似 API | 選擇依據 |
+| --- | --- | --- | --- | --- |
+| `spin_lock()` / `spin_unlock()` | `shm_write()`、`shm_read()` | 保護 syscall path 的 ring state。 | `mutex`、rwlock | critical section 原本設計很短；但 user copy 放在 lock 內有風險。 |
+| `smp_wmb()` | `shm_write()` | 確保資料寫入先於 `head` 更新。 | `smp_store_release()` | 目前用 barrier 呈現概念；release semantic 可更精準。 |
+| `smp_rmb()` | `shm_read()` | 確保讀到 index 後再讀 slot data。 | `smp_load_acquire()` | acquire/release 會比裸 barrier 更容易維護。 |
+| `__sync_synchronize()` | user mmap worker | user-space full memory barrier。 | C11 `atomic_thread_fence()` | 舊 GCC builtin，簡單但語意較粗。 |
+| `volatile` | shared `head/tail` | 避免編譯器把值快取在暫存器。 | C11 `_Atomic` | `volatile` 不等於完整同步；若要嚴謹應用 atomic。 |
+
+教學提醒：
+
+- `volatile` 只能限制編譯器最佳化，不保證跨 CPU 的完整同步語意。
+- 如果要把 mmap ring 做成更正式的 SPSC queue，建議使用 acquire/release atomic。
+- 若要支援 MPMC，僅靠 `head/tail` 不夠，需要 CAS 或 per-slot state。
+
+### 8. Userspace API
+
+| API | 位置 | 功能 | 注意事項 |
+| --- | --- | --- | --- |
+| `open()` | demos、benchmark | 開啟 `/dev/mq_ipc`、`/dev/shm_ipc`。 | 失敗常見原因是 module 未載入或權限不足。 |
+| `write()` | MQ/SHM syscall worker | producer 送出 64 bytes。 | 目前 module protocol 建議固定 `MSG_SIZE`。 |
+| `read()` | MQ/SHM syscall worker | consumer 讀取 64 bytes。 | MQ 可 blocking；SHM syscall empty 回 `EAGAIN`。 |
+| `mmap()` | `shm_demo.c`、`benchmark.c` | 取得 shared ring pointer。 | 需要 `MAP_SHARED`，否則不符合 shared memory 語意。 |
+| `munmap()` | cleanup | 解除 user mapping。 | 不會釋放 kernel `g_shm`，kernel memory 由 module 管。 |
+| `pthread_create()` | `benchmark.c` | 建立 producer / consumer。 | 目前 return value 未檢查。 |
+| `pthread_barrier_wait()` | workers | 讓 producer/consumer 同步起跑。 | 減少 benchmark 起跑偏差。 |
+| `clock_gettime()` | `now_us()` | 量測時間。 | 使用 `CLOCK_MONOTONIC`，避免系統時間調整影響。 |
 
 ---
 
-### 4. Call Graph
+## 第五階段：Runtime Chain
 
-#### Initialization Chain
-
-# Direct Observation
-
-```text
-scripts/01_setup.sh
-  -> apt-get update/install dependencies
-  -> make -C "${PROJECT_DIR}" kernel
-  -> make -C "${PROJECT_DIR}" user
-  -> insmod kernel/mq_module.ko
-       -> module_init(mq_init)
-       -> atomic64_set(stats)
-       -> alloc_chrdev_region(&g_devno)
-       -> cdev_init(&g_cdev, &g_fops)
-       -> cdev_add(&g_cdev, g_devno, 1)
-       -> class_create(MQ_DEVICE)
-       -> device_create(..., "mq_ipc")
-       -> proc_create("mq_stats", 0444, NULL, &g_proc_ops)
-  -> insmod kernel/shm_module.ko
-       -> module_init(shm_init)
-       -> g_shm = vmalloc(SHM_BUF_SIZE)
-       -> memset(g_shm, 0, SHM_BUF_SIZE)
-       -> g_shm->capacity = RING_CAPACITY
-       -> g_shm->msg_size = MSG_SIZE
-       -> spin_lock_init(&g_spin)
-       -> atomic64_set(stats)
-       -> alloc_chrdev_region(&g_devno)
-       -> cdev_init(&g_cdev, &g_fops)
-       -> cdev_add(&g_cdev, g_devno, 1)
-       -> class_create(SHM_DEVICE)
-       -> device_create(..., "shm_ipc")
-       -> proc_create("shm_stats", 0444, NULL, &g_proc_ops)
-  -> chmod 666 /dev/mq_ipc /dev/shm_ipc
-```
-
-#### Runtime Chain：MQ syscall path
+### 1. MQ write chain
 
 # Direct Observation
 
 ```text
-user producer
-  -> write(mqfd, buf, MSG_SIZE)
-  -> VFS dispatch: g_fops.write
+user write(fd_mq, buf, MSG_SIZE)
+  -> VFS dispatch g_fops.write
   -> mq_write()
-       -> clamp len to MSG_SIZE
+       -> len clamp to MSG_SIZE if larger
        -> copy_from_user(kb, ubuf, len)
-       -> wait_event_interruptible(g_wr_wq, kfifo_avail(&g_fifo) >= MSG_SIZE)
-       -> mutex_lock(&g_lock)
-       -> kfifo_in(&g_fifo, kb, MSG_SIZE)
-       -> mutex_unlock(&g_lock)
-       -> atomic64_inc(&st_enq)
+       -> wait_event_interruptible(g_wr_wq, kfifo_avail >= MSG_SIZE)
+       -> mutex_lock(g_lock)
+       -> kfifo_in(g_fifo, kb, MSG_SIZE)
+       -> mutex_unlock(g_lock)
+       -> atomic64_inc(st_enq)
        -> WRITE_ONCE(st_last_enq_ts, ts)
-       -> wake_up_interruptible(&g_rd_wq)
-       -> return MSG_SIZE
-
-user consumer
-  -> read(mqfd, buf, MSG_SIZE)
-  -> VFS dispatch: g_fops.read
-  -> mq_read()
-       -> reject len < MSG_SIZE
-       -> if nonblock and FIFO short: return -EAGAIN
-       -> wait_event_interruptible(g_rd_wq, kfifo_len(&g_fifo) >= MSG_SIZE)
-       -> mutex_lock(&g_lock)
-       -> kfifo_out(&g_fifo, kb, MSG_SIZE)
-       -> mutex_unlock(&g_lock)
-       -> copy_to_user(ubuf, kb, MSG_SIZE)
-       -> update latency counters
-       -> wake_up_interruptible(&g_wr_wq)
+       -> wake_up_interruptible(g_rd_wq)
        -> return MSG_SIZE
 ```
 
-#### Runtime Chain：SHM syscall path
+### 2. MQ read chain
 
 # Direct Observation
 
 ```text
-user producer
-  -> write(shmfd, buf, MSG_SIZE)
-  -> VFS dispatch: g_fops.write
+user read(fd_mq, buf, MSG_SIZE)
+  -> VFS dispatch g_fops.read
+  -> mq_read()
+       -> if len < MSG_SIZE: -EINVAL
+       -> if O_NONBLOCK and FIFO short: -EAGAIN
+       -> otherwise wait_event_interruptible(g_rd_wq, kfifo_len >= MSG_SIZE)
+       -> mutex_lock(g_lock)
+       -> kfifo_out(g_fifo, kb, MSG_SIZE)
+       -> mutex_unlock(g_lock)
+       -> copy_to_user(ubuf, kb, MSG_SIZE)
+       -> update dequeue/latency stats
+       -> wake_up_interruptible(g_wr_wq)
+       -> return MSG_SIZE
+```
+
+### 3. SHM syscall write chain
+
+# Direct Observation
+
+```text
+user write(fd_shm, buf, MSG_SIZE)
+  -> VFS dispatch g_fops.write
   -> shm_write()
-       -> clamp len to MSG_SIZE
-       -> spin_lock(&g_spin)
-       -> head = g_shm->head
-       -> next = (head + 1) % capacity
-       -> if next == tail: return -ENOSPC
+       -> len clamp to MSG_SIZE if larger
+       -> spin_lock(g_spin)
+       -> read head, compute next
+       -> if ring full: -ENOSPC
        -> copy_from_user(g_shm->data[head], ubuf, len)
        -> smp_wmb()
        -> g_shm->head = next
-       -> spin_unlock(&g_spin)
-       -> update stats
+       -> spin_unlock(g_spin)
+       -> update write stats
        -> return MSG_SIZE
+```
 
-user consumer
-  -> read(shmfd, buf, MSG_SIZE)
-  -> VFS dispatch: g_fops.read
+# Risk / TODO
+
+`copy_from_user()` 目前位於 `spin_lock()` 與 `spin_unlock()` 之間。若 user page fault，這個設計有風險。較安全的做法是先在 lock 外 copy 到 kernel 暫存 buffer，再進 lock 更新 ring。
+
+### 4. SHM syscall read chain
+
+# Direct Observation
+
+```text
+user read(fd_shm, buf, MSG_SIZE)
+  -> VFS dispatch g_fops.read
   -> shm_read()
-       -> reject len < MSG_SIZE
-       -> spin_lock(&g_spin)
+       -> if len < MSG_SIZE: -EINVAL
+       -> spin_lock(g_spin)
+       -> if ring empty: -EAGAIN
        -> tail = g_shm->tail
-       -> if tail == head: return -EAGAIN
        -> smp_rmb()
        -> memcpy(tmp, g_shm->data[tail], MSG_SIZE)
-       -> g_shm->tail = (tail + 1) % capacity
-       -> spin_unlock(&g_spin)
+       -> g_shm->tail = next
+       -> spin_unlock(g_spin)
        -> copy_to_user(ubuf, tmp, MSG_SIZE)
-       -> update stats
+       -> update read/latency stats
        -> return MSG_SIZE
 ```
 
-#### Runtime Chain：SHM mmap path
+### 5. SHM mmap chain
 
 # Direct Observation
 
 ```text
-setup
-  -> user mmap(NULL, SHM_MAP_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, shmfd, 0)
-  -> VFS dispatch: g_fops.mmap
+user mmap(NULL, SHM_MAP_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, fd_shm, 0)
+  -> VFS dispatch g_fops.mmap
   -> shm_mmap()
-       -> reject mapping larger than SHM_BUF_SIZE
+       -> check requested size <= SHM_BUF_SIZE
        -> vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP)
        -> for each page:
-            pfn = vmalloc_to_pfn(g_shm + offset)
-            remap_pfn_range(vma, user_addr, pfn, PAGE_SIZE, vma->vm_page_prot)
+            pfn = vmalloc_to_pfn(kaddr)
+            remap_pfn_range(vma, user_addr, pfn, PAGE_SIZE, prot)
        -> return 0
 
-runtime producer
-  -> mmap_worker()
-       -> while ring full: spin
-       -> memcpy(shm->data[head], fill, MSG_SIZE)
-       -> __sync_synchronize()
-       -> shm->head.value = next
+after mmap:
+  producer:
+    wait while ring full
+    memcpy(shm->data[head], fill, MSG_SIZE)
+    __sync_synchronize()
+    shm->head.value = next
 
-runtime consumer
-  -> mmap_worker()
-       -> while ring empty: spin
-       -> __sync_synchronize()
-       -> memcpy(sink, shm->data[tail], MSG_SIZE)
-       -> shm->tail.value = (tail + 1) % capacity
+  consumer:
+    wait while ring empty
+    __sync_synchronize()
+    memcpy(sink, shm->data[tail], MSG_SIZE)
+    shm->tail.value = next
 ```
 
-#### Cleanup Chain
+---
+
+## 第六階段：資料結構與 ABI
+
+### 1. MQ storage
 
 # Direct Observation
+
+```c
+#define MSG_SIZE     64
+#define QUEUE_DEPTH  512
+#define FIFO_SIZE    (MSG_SIZE * QUEUE_DEPTH)
+
+static DEFINE_KFIFO(g_fifo, char, FIFO_SIZE);
+```
+
+說明：
+
+- FIFO 以 bytes 為單位。
+- 程式邏輯把每 64 bytes 視為一筆 message。
+- 若 caller 傳小於 64 bytes，目前仍會 commit 64 bytes，這是 protocol 風險。
+
+### 2. SHM kernel layout
+
+# Direct Observation
+
+`kernel/shm_module.c`：
 
 ```text
-scripts/04_cleanup.sh
-  -> if lsmod has shm_module: rmmod shm_module
-       -> module_exit(shm_exit)
-       -> remove_proc_entry("shm_stats", NULL)
-       -> device_destroy(g_class, g_devno)
-       -> class_destroy(g_class)
-       -> cdev_del(&g_cdev)
-       -> unregister_chrdev_region(g_devno, 1)
-       -> vfree(g_shm)
-  -> if lsmod has mq_module: rmmod mq_module
-       -> module_exit(mq_exit)
-       -> remove_proc_entry("mq_stats", NULL)
-       -> device_destroy(g_class, g_devno)
-       -> class_destroy(g_class)
-       -> cdev_del(&g_cdev)
-       -> unregister_chrdev_region(g_devno, 1)
-  -> make clean
-  -> verify lsmod, /dev, /proc cleanup
+struct shm_region
+  offset 0    : head
+  offset 4    : pad1[60]
+  offset 64   : tail
+  offset 68   : pad2[60]
+  offset 128  : capacity
+  offset 132  : msg_size
+  offset 136  : data[...]
 ```
 
-#### Callback Chain
+### 3. SHM user layout
 
 # Direct Observation
+
+`user/common.h`：
 
 ```text
-VFS open/read/write/release on /dev/mq_ipc
-  -> mq_module.c:g_fops
-  -> mq_open / mq_read / mq_write / mq_release
-
-VFS open/read/write/mmap/release on /dev/shm_ipc
-  -> shm_module.c:g_fops
-  -> shm_open / shm_read / shm_write / shm_mmap / shm_release
-
-procfs open/read on /proc/mq_stats
-  -> mq_module.c:g_proc_ops.proc_open
-  -> mq_proc_open()
-  -> single_open(..., mq_stats_show, NULL)
-  -> seq_read()
-  -> mq_stats_show()
-
-procfs open/read on /proc/shm_stats
-  -> shm_module.c:g_proc_ops.proc_open
-  -> shm_proc_open()
-  -> single_open(..., shm_stats_show, NULL)
-  -> seq_read()
-  -> shm_stats_show()
-
-pthread_create in benchmark
-  -> syscall_worker OR mmap_worker
+shm_region_t
+  offset 0    : head.value + padding
+  offset 64   : tail.value + padding
+  offset 128  : meta.capacity + meta.msg_size + padding
+  offset 192  : data[...]
 ```
 
-#### Indirect Call Chain / Dispatch Table
+# Risk / TODO
 
-# Direct Observation
+目前 kernel 與 user 對 `data` 的 offset 不一致。mmap demo 與 benchmark 的 mmap path 主要由 user producer 與 user consumer 同時依照 user layout 操作，因此不一定立刻失敗。但若未來要混用 syscall path 與 mmap path，或讓 kernel 解讀 user mmap 寫入的 data slot，就會有 ABI mismatch 風險。
 
-| Dispatch table | Function pointer | Bound function | Trigger |
+建議修正：
+
+```text
+方案 A：kernel 也加入 64-byte meta padding，讓 data offset = 192
+方案 B：user 移除 meta padding，讓 data offset = 136
+方案 C：改成共用 layout header，並加入 BUILD_BUG_ON / static_assert 檢查 offsetof(data)
+```
+
+---
+
+## 第七階段：錯誤碼與除錯方向
+
+| 錯誤碼 | 來源 | 意思 | 除錯方向 |
 | --- | --- | --- | --- |
-| `mq_module.c:g_fops` | `.write` | `mq_write` | `write("/dev/mq_ipc")` |
-| `mq_module.c:g_fops` | `.read` | `mq_read` | `read("/dev/mq_ipc")` |
-| `mq_module.c:g_proc_ops` | `.proc_open` | `mq_proc_open` | `open("/proc/mq_stats")` |
-| `shm_module.c:g_fops` | `.write` | `shm_write` | `write("/dev/shm_ipc")` |
-| `shm_module.c:g_fops` | `.read` | `shm_read` | `read("/dev/shm_ipc")` |
-| `shm_module.c:g_fops` | `.mmap` | `shm_mmap` | `mmap("/dev/shm_ipc")` |
-| `shm_module.c:g_proc_ops` | `.proc_open` | `shm_proc_open` | `open("/proc/shm_stats")` |
-| `pthread_create` | start routine | `syscall_worker` / `mmap_worker` | `run_test()` |
+| `-EFAULT` | `copy_from_user()` / `copy_to_user()` | user pointer 無法安全存取。 | 檢查 buffer 位址、長度、是否已 mmap。 |
+| `-EINTR` | `wait_event_interruptible()` | 等待期間被 signal 中斷。 | user worker 可重試，目前 benchmark 有 retry。 |
+| `-EAGAIN` | nonblock MQ empty、SHM ring empty | 暫時不能讀。 | syscall worker retry；正式程式可用 poll/backoff。 |
+| `-ENOSPC` | SHM ring full | 暫時不能寫。 | producer retry 或設計 backpressure。 |
+| `-EINVAL` | read len 太小、mmap size 過大 | 參數不符合 module protocol。 | 確認固定 64 bytes 與 `SHM_MAP_SIZE`。 |
+| `-ENOMEM` | `vmalloc()` 或 `device_create()` | 記憶體或 device 建立失敗。 | 看 `dmesg`，確認資源狀態。 |
 
-目前程式碼中未觀察到 ioctl dispatch table、poll table、netlink callback、timer callback、IRQ callback。
+使用者空間常見錯誤：
 
----
-
-### 5. Struct / Resource Tracing
-
-#### `struct shm_region`
-
-# Direct Observation
-
-- 定義位置：`kernel/shm_module.c`。
-- 欄位：
-  - `alignas(64) volatile uint32_t head`
-  - `uint8_t pad1[60]`
-  - `alignas(64) volatile uint32_t tail`
-  - `uint8_t pad2[60]`
-  - `uint32_t capacity`
-  - `uint32_t msg_size`
-  - `char data[RING_CAPACITY][MSG_SIZE]`
-- allocation / init：
-  - `shm_init()` 呼叫 `vmalloc(SHM_BUF_SIZE)`。
-  - `memset(g_shm, 0, SHM_BUF_SIZE)`。
-  - `g_shm->capacity = RING_CAPACITY`。
-  - `g_shm->msg_size = MSG_SIZE`。
-- ownership：
-  - kernel module owns `g_shm` allocation。
-  - user mmap path obtains mapping，未擁有 backing allocation。
-- lifetime：
-  - start：`shm_init()` 成功配置。
-  - runtime：`shm_write()` / `shm_read()` / `shm_mmap()` / user mmap worker 共用。
-  - release：`shm_exit()` 呼叫 `vfree(g_shm)`。
-- state transition：
-  - producer 更新 `head`。
-  - consumer 更新 `tail`。
-  - `(head + 1) % capacity == tail` 表示 full。
-  - `tail == head` 表示 empty。
-- data passing path：
-  - syscall path：user buffer -> `copy_from_user()` -> `g_shm->data[head]` -> `memcpy(tmp, slot)` -> `copy_to_user()`。
-  - mmap path：user producer `memcpy()` 直接寫 `shm->data[head]`，user consumer `memcpy()` 直接讀 `shm->data[tail]`。
-- callback binding：
-  - `shm_mmap()` 透過 `g_fops.mmap` 讓 `g_shm` 被映射。
-
-#### `shm_region_t`
-
-# Direct Observation
-
-- 定義位置：`user/common.h`。
-- layout 與 kernel `struct shm_region` 對應，包含 `head/tail/capacity/msg_size/_pad/data`。
-- 使用位置：
-  - `user/benchmark.c`：`mmap()` 後轉型為 `shm_region_t *`，由 `mmap_worker()` 使用。
-  - `user/shm_demo.c`：`mmap()` 後重設 `head/tail` 並直接讀寫 ring。
-
-# Conservative Inference
-
-kernel 與 user 兩邊以相同欄位順序手動維持 ABI layout；目前程式碼中未觀察到 `static_assert`、版本欄位或 ioctl 查詢 layout 的機制。因此若其中一邊 struct layout 修改但另一邊未同步，mmap path 會有 ABI mismatch 風險。
-
-#### MQ FIFO Resource：`g_fifo`
-
-# Direct Observation
-
-- 定義位置：`kernel/mq_module.c`。
-- allocation / init：`DEFINE_KFIFO(g_fifo, char, FIFO_SIZE)` static allocation。
-- ownership：MQ kernel module owns FIFO。
-- lifetime：
-  - module load 後存在。
-  - module unload 後隨 module memory 消失。
-- state transition：
-  - `mq_write()` 以 `kfifo_in(&g_fifo, kb, MSG_SIZE)` 增加資料。
-  - `mq_read()` 以 `kfifo_out(&g_fifo, kb, MSG_SIZE)` 減少資料。
-- synchronization：
-  - `g_lock` 保護 actual in/out operation。
-  - `g_rd_wq` / `g_wr_wq` 提供 blocking wait。
-
-#### Character Device Resource：`g_devno` / `g_cdev` / `g_class`
-
-# Direct Observation
-
-- MQ 與 SHM module 各自有自己的 `g_devno`、`g_cdev`、`g_class`。
-- allocation / init：
-  - `alloc_chrdev_region()` -> `cdev_init()` -> `cdev_add()` -> `class_create()` -> `device_create()`。
-- release timing：
-  - `device_destroy()` -> `class_destroy()` -> `cdev_del()` -> `unregister_chrdev_region()`。
-- ownership：
-  - module owns registration；user only owns opened fd。
-
-#### `targ_t`
-
-# Direct Observation
-
-- 定義位置：`user/benchmark.c`。
-- 欄位：
-  - `int fd`
-  - `shm_region_t *shm`
-  - `int count`
-  - `int is_producer`
-  - `pthread_barrier_t *bar`
-  - `double elapsed_us`
-- allocation / init：
-  - `run_test()` 內以 stack local `pa` / `ca` 建立 producer/consumer args。
-- ownership / lifetime：
-  - `run_test()` owns stack object。
-  - worker thread 在 `pthread_join()` 前使用該指標。
-- data passing path：
-  - `pthread_create()` 把 `&pa`、`&ca` 傳給 worker。
-
-#### Proc Stats Resource
-
-# Direct Observation
-
-- `proc_create()` return value 目前未存到 global pointer。
-- cleanup 使用 `remove_proc_entry("mq_stats", NULL)` 與 `remove_proc_entry("shm_stats", NULL)` 依名稱移除。
-- stats data：
-  - MQ：`st_enq`、`st_deq`、`st_lat_ns_total`、`st_last_enq_ts`、`kfifo_len()`、`kfifo_avail()`。
-  - SHM：`st_wr`、`st_rd`、`st_lat_ns_total`、`st_last_wr_ts`、`g_shm->head/tail/capacity/msg_size`。
+| 現象 | 可能原因 | 檢查 |
+| --- | --- | --- |
+| `open /dev/mq_ipc: No such file or directory` | module 尚未載入。 | `lsmod | grep mq_module` |
+| `Permission denied` | device 權限不足。 | `ls -lh /dev/mq_ipc /dev/shm_ipc` |
+| `mmap: Invalid argument` | mapping size 大於 kernel 接受大小或 fd 不對。 | 檢查 `SHM_MAP_SIZE`、`/dev/shm_ipc` |
+| `bc: command not found` | script 依賴缺少。 | `sudo apt install -y bc` |
 
 ---
 
-### 6. Execution Trace（文字流程圖）
+## 第八階段：API 選擇總表
 
-#### Initialization Flow
-
-# Direct Observation
-
-```text
-[setup script]
-01_setup.sh
-  -> root check
-  -> install build dependencies
-  -> build kernel modules
-  -> build user binaries
-  -> insmod mq_module.ko
-  -> insmod shm_module.ko
-  -> chmod /dev/mq_ipc /dev/shm_ipc
-  -> read /proc/mq_stats and /proc/shm_stats line counts
-
-[mq module]
-mq_init
-  -> initialize counters
-  -> register char device
-  -> bind g_fops
-  -> create /dev/mq_ipc
-  -> create /proc/mq_stats
-
-[shm module]
-shm_init
-  -> vmalloc shared ring
-  -> initialize capacity/msg_size/head/tail
-  -> initialize spinlock and counters
-  -> register char device
-  -> bind g_fops
-  -> create /dev/shm_ipc
-  -> create /proc/shm_stats
-```
-
-#### Runtime Flow
-
-# Direct Observation
-
-```text
-[benchmark main]
-main
-  -> parse count
-  -> open /dev/mq_ipc
-  -> open /dev/shm_ipc
-  -> mmap /dev/shm_ipc
-  -> run_test("Message Queue", mqfd, NULL, count, false)
-  -> run_test("Shared Memory (syscall)", shmfd, NULL, count, false)
-  -> reset shm->head.value = shm->tail.value = 0
-  -> run_test("Shared Memory (mmap)", shmfd, shm, count, true)
-  -> system("cat /proc/mq_stats")
-  -> system("cat /proc/shm_stats")
-  -> munmap/close
-```
-
-#### Cleanup Flow
-
-# Direct Observation
-
-```text
-[user process cleanup]
-benchmark/shm_demo
-  -> munmap(shm, SHM_MAP_SIZE)
-  -> close(fd)
-  -> kernel .release callback returns 0
-
-[module cleanup]
-04_cleanup.sh or manual rmmod
-  -> rmmod shm_module
-       -> shm_exit
-       -> remove /proc/shm_stats
-       -> remove /dev/shm_ipc registration
-       -> vfree(g_shm)
-  -> rmmod mq_module
-       -> mq_exit
-       -> remove /proc/mq_stats
-       -> remove /dev/mq_ipc registration
-```
-
-#### Data Flow
-
-# Direct Observation
-
-```text
-MQ:
-producer user buf
-  -> copy_from_user()
-  -> stack kb[64]
-  -> kfifo
-  -> stack kb[64]
-  -> copy_to_user()
-  -> consumer user buf
-
-SHM syscall:
-producer user buf
-  -> copy_from_user()
-  -> g_shm->data[head]
-  -> memcpy(tmp, g_shm->data[tail])
-  -> copy_to_user()
-  -> consumer user buf
-
-SHM mmap:
-producer user fill[64]
-  -> memcpy(shm->data[head], fill, 64)
-  -> shared mapped pages
-  -> memcpy(sink, shm->data[tail], 64)
-  -> consumer stack sink[64]
-```
-
-#### Event Flow
-
-# Direct Observation
-
-```text
-MQ write event:
-  FIFO has >= 64 bytes free
-  -> writer enqueues
-  -> wake_up_interruptible(g_rd_wq)
-
-MQ read event:
-  FIFO has >= 64 bytes data
-  -> reader dequeues
-  -> wake_up_interruptible(g_wr_wq)
-
-SHM syscall event:
-  write sees ring not full
-  -> updates head
-  read sees ring not empty
-  -> updates tail
-
-SHM mmap event:
-  producer/consumer spin on head/tail visibility
-  -> no kernel wakeup per message
-```
-
-#### Ownership Transfer
-
-# Direct Observation
-
-```text
-MQ:
-user owns original buffer
-kernel owns copied FIFO bytes
-consumer receives a copy
-no pointer ownership crosses boundary
-
-SHM syscall:
-kernel owns g_shm allocation
-user writes/reads through syscall copies
-no mapping ownership transfer
-
-SHM mmap:
-kernel owns backing g_shm allocation
-user owns VMA mapping until munmap/process exit
-producer/consumer coordinate slots by head/tail, not by object ownership token
-```
-
----
-
-## 第二階段：Architecture / API Technical Report
-
-### 1. Entry Point 行為
-
-# Direct Observation
-
-#### Kernel entry points
-
-- `mq_init()` 是 MQ module load entry。
-  - 建立 char device 與 proc stats。
-  - 沒有配置 per-open state。
-  - `.open` / `.release` callback 只回傳 0。
-
-- `shm_init()` 是 SHM module load entry。
-  - 先配置並初始化 `g_shm`，再註冊 char device。
-  - mmap path 的 backing memory 在 module lifetime 內維持同一份 global region。
-  - `.open` / `.release` callback 只回傳 0。
-
-#### User entry points
-
-- `user/benchmark.c:main()`
-  - 解析 count。
-  - 開啟兩個 device。
-  - 對 SHM device 做一次 `mmap()`。
-  - 依序測三種 path。
-  - 最後讀取 `/proc/mq_stats` 與 `/proc/shm_stats`。
-
-- `user/mq_demo.c:main()`
-  - 開啟 `/dev/mq_ipc`。
-  - 連續寫入 `DEMO_N` 筆，再讀出 `DEMO_N` 筆。
-  - 最後 `cat /proc/mq_stats`。
-
-- `user/shm_demo.c:main()`
-  - 開啟 `/dev/shm_ipc`。
-  - `mmap()` shared region。
-  - 重設 `head/tail`。
-  - 用 user-space producer/consumer loop 操作 ring。
-  - 最後 `cat /proc/shm_stats`。
-
-# Conservative Inference
-
-因為 `.open` 沒有配置 private data，且 `g_fifo` / `g_shm` 皆為 module-global resource，目前行為是所有 opener 共用同一份 queue/ring。程式碼中未觀察到 per-client isolation。
-
----
-
-### 2. Callback Registration Chain
-
-# Direct Observation
-
-```text
-MQ:
-mq_init()
-  -> cdev_init(&g_cdev, &g_fops)
-       g_fops.write = mq_write
-       g_fops.read = mq_read
-       g_fops.open = mq_open
-       g_fops.release = mq_release
-  -> proc_create("mq_stats", ..., &g_proc_ops)
-       g_proc_ops.proc_open = mq_proc_open
-       mq_proc_open -> single_open(..., mq_stats_show, NULL)
-
-SHM:
-shm_init()
-  -> cdev_init(&g_cdev, &g_fops)
-       g_fops.write = shm_write
-       g_fops.read = shm_read
-       g_fops.mmap = shm_mmap
-       g_fops.open = shm_open
-       g_fops.release = shm_release
-  -> proc_create("shm_stats", ..., &g_proc_ops)
-       g_proc_ops.proc_open = shm_proc_open
-       shm_proc_open -> single_open(..., shm_stats_show, NULL)
-```
-
-目前程式碼中未觀察到 callback deregistration pointer 保存；cleanup 以 `remove_proc_entry(name, NULL)` 依名稱移除 proc entry。
-
----
-
-### 3. Runtime Dispatch Flow 與 Indirect Call Path
-
-# Direct Observation
-
-#### MQ
-
-- `write()` 不會直接呼叫 `mq_write()`；它經過 VFS 與 `g_fops.write` function pointer dispatch。
-- `read()` 不會直接呼叫 `mq_read()`；它經過 VFS 與 `g_fops.read` function pointer dispatch。
-- `cat /proc/mq_stats` 經過 procfs、`g_proc_ops.proc_open`、`single_open()`，最後由 seq_file 呼叫 `mq_stats_show()`。
-
-#### SHM
-
-- `write()` / `read()` 經過 `shm_module.c:g_fops` dispatch 到 `shm_write()` / `shm_read()`。
-- `mmap()` 經過 `g_fops.mmap` dispatch 到 `shm_mmap()`。
-- mmap 建立後，每筆 message 的 producer/consumer 操作不再經過 kernel callback，而是直接操作 mapped `shm_region_t`。
-
-#### Benchmark
-
-- `run_test()` 不是直接呼叫 worker function 執行 loop，而是透過 `pthread_create()` 的 start routine function pointer 啟動。
-- `use_mmap == true` 時傳 `mmap_worker`；否則傳 `syscall_worker`。
-
-# Conservative Inference
-
-SHM mmap path 的效能差異主要來自每筆 message 避開 VFS syscall dispatch 與 `copy_from_user()` / `copy_to_user()`，這是由 `mmap_worker()` 直接 `memcpy()` mapped region 可直接驗證出的保守推論。
-
----
-
-### 4. Resource Lifecycle / Ownership Transition
-
-# Direct Observation
-
-#### MQ resource model
-
-- `g_fifo` 是 static module-global FIFO。
-- writer 只把資料 copy 進 FIFO，不移交 user pointer。
-- reader 只從 FIFO copy 出資料，不取得 FIFO slot ownership。
-- flow 中沒有 per-message allocation/free。
-- module exit 沒有特別 drain FIFO；module unload 會移除整個 device 與 module storage。
-
-#### SHM syscall resource model
-
-- `g_shm` 由 kernel `vmalloc()` 建立。
-- `shm_write()` 用 `head` 選 slot，成功後更新 `head`。
-- `shm_read()` 用 `tail` 選 slot，成功後更新 `tail`。
-- ring full/empty 以 return code 表達，不使用 wait queue。
-- `g_shm` 在 `shm_exit()` 統一 `vfree()`。
-
-#### SHM mmap resource model
-
-- kernel 仍 owns `g_shm` backing pages。
-- user process obtains shared mapping through `mmap()`。
-- user producer/consumer 直接修改 `head/tail/data`。
-- `munmap()` 只解除 user VMA，不釋放 kernel backing memory。
-- module unload 釋放 `g_shm`；目前程式碼中未觀察到 custom `vm_operations_struct` 追蹤 mapping open/close。
-
-# Conservative Inference
-
-因為沒有 `vm_ops` reference tracking，若 module unload 時仍有 user mapping，實際安全性會依 kernel module refcount / VMA 對 file 的持有行為而定；目前 code 中無法從 module 自身確認它有額外保護 active mapping lifetime 的機制。
-
----
-
-### 5. Error Propagation Path
-
-# Direct Observation
-
-#### Kernel -> User
-
-- MQ：
-  - `copy_from_user()` failure -> `mq_write()` 回 `-EFAULT`。
-  - writer wait 被 signal interrupt -> `-EINTR`。
-  - `mq_read()` length < 64 -> `-EINVAL`。
-  - `O_NONBLOCK` 且 FIFO 不足 -> `-EAGAIN`。
-  - `copy_to_user()` failure -> `-EFAULT`。
-
-- SHM：
-  - `vmalloc()` failure -> `shm_init()` 回 `-ENOMEM`。
-  - `shm_write()` ring full -> `-ENOSPC`。
-  - `shm_read()` ring empty -> `-EAGAIN`。
-  - read length < 64 -> `-EINVAL`。
-  - `shm_mmap()` requested size > `SHM_BUF_SIZE` -> `-EINVAL`。
-  - `remap_pfn_range()` failure -> 立即回該 error。
-
-#### User handling
-
-- `benchmark.c`
-  - `open()` / `mmap()` failure 會 `perror()`。
-  - `syscall_worker()` 對 `EAGAIN`、`ENOSPC`、`EINTR` retry。
-  - `pthread_create()`、`pthread_join()`、`pthread_barrier_init()` return value 目前未檢查。
-  - `mmap()` failure 走 `goto done`，最後仍 `return 0`。
-
-- `mq_demo.c`
-  - `open()` failure 會 `perror()` 並 `return 1`。
-  - `write()` / `read()` return value 目前未檢查。
-
-- `shm_demo.c`
-  - `open()` / `mmap()` failure 會回 `1`。
-  - mmap ring full/empty 使用 busy-spin，沒有 timeout。
-
----
-
-### 6. 類似 API / Mechanism 比較分析
-
-#### MQ vs SHM syscall vs SHM mmap
-
-# Direct Observation
-
-| 比較項 | MQ syscall | SHM syscall | SHM mmap |
+| 設計點 | 本專案選擇 | 為什麼 | 代價 |
 | --- | --- | --- | --- |
-| external interface | `/dev/mq_ipc` read/write | `/dev/shm_ipc` read/write | `/dev/shm_ipc` mmap + user pointer access |
-| storage | `DEFINE_KFIFO(g_fifo)` | `vmalloc()` ring `g_shm` | 同一份 `g_shm` 映射到 user |
-| dispatch | VFS `.read/.write` | VFS `.read/.write` | 只有 setup 經 VFS `.mmap`；每筆 message 不經 VFS |
-| copy count | user -> kernel stack -> kfifo；kfifo -> kernel stack -> user | user -> shared ring；shared ring -> kernel stack -> user | user memcpy -> shared ring；shared ring -> user memcpy |
-| full behavior | writer 在 wait queue sleep | `shm_write()` 回 `-ENOSPC` | user producer busy-spin |
-| empty behavior | reader 可 sleep 或 nonblock `-EAGAIN` | `shm_read()` 回 `-EAGAIN` | user consumer busy-spin |
-| synchronization | `mutex` + wait queues | `spinlock` + memory barriers | volatile head/tail + `__sync_synchronize()` |
-| stats | `/proc/mq_stats` | `/proc/shm_stats` | 使用同一份 SHM stats，但 mmap per-message 不會更新 `st_wr/st_rd` |
-
-#### `mq_write()` vs `shm_write()`
-
-# Direct Observation
-
-- 相同點：
-  - 都接受 user buffer。
-  - 都把 `len > MSG_SIZE` clamp 到 64。
-  - 都成功回傳 `MSG_SIZE`。
-  - 都更新 atomic counter 與 global last timestamp。
-
-- 差異：
-  - `mq_write()` 在 `copy_from_user()` 後，如果 FIFO 沒空間會 sleep 等待；`shm_write()` 不等待，ring full 直接回 `-ENOSPC`。
-  - `mq_write()` 用 `mutex` 保護 `kfifo_in()`；`shm_write()` 用 `spin_lock` 保護 ring state。
-  - `mq_write()` 寫入 `kfifo`；`shm_write()` 寫入 `g_shm->data[head]` 並更新 `head`。
-
-#### `mq_read()` vs `shm_read()`
-
-# Direct Observation
-
-- 相同點：
-  - `len < MSG_SIZE` 都回 `-EINVAL`。
-  - 成功時都複製 64 bytes 給 user。
-  - 都更新 read/dequeue counter 與 latency total。
-
-- 差異：
-  - `mq_read()` 可以 blocking wait；`shm_read()` ring empty 直接回 `-EAGAIN`。
-  - `mq_read()` 讀完會 `wake_up_interruptible(&g_wr_wq)`；`shm_read()` 沒有 wait queue。
-  - `mq_read()` 從 `kfifo` 取資料；`shm_read()` 從 `g_shm->data[tail]` 取資料並更新 `tail`。
-
-#### Callback 機制差異
-
-# Direct Observation
-
-- MQ 與 SHM syscall path 都透過 `struct file_operations`。
-- SHM 額外提供 `.mmap = shm_mmap`；MQ 沒有 mmap callback。
-- Proc stats 兩者都透過 `struct proc_ops` + `single_open()` + `seq_read()`。
-- User benchmark 的 callback 是 pthread start routine，不是 kernel callback。
-
-#### Dispatch Model 使用原因（基於 code）
-
-# Direct Observation
-
-- `cdev_init(&g_cdev, &g_fops)` 是兩個 module 讓 `/dev/*` 對應 read/write/mmap callback 的直接原因。
-- `proc_create(..., &g_proc_ops)` 是 `/proc/*_stats` 讀取 stats callback 的直接原因。
-- `pthread_create(..., use_mmap ? mmap_worker : syscall_worker, ...)` 是 benchmark 在 runtime 選擇 execution model 的直接原因。
-
-# Conservative Inference
-
-程式以相同 `MSG_SIZE` 與類似 producer/consumer loop 比較三種 dispatch model：kernel blocking queue、kernel ring syscall、user-space mapped ring。這是由 `benchmark.c` 的三次 `run_test()` 呼叫順序與參數推得。
+| MQ storage | `kfifo` | 內建 FIFO helper，適合固定大小 byte queue。 | 缺少 per-message metadata，需要自己保證固定 64 bytes。 |
+| MQ wait | `wait_queue` | 空/滿時讓 task 睡眠，CPU 使用率合理。 | wake/sleep 有排程成本。 |
+| SHM allocation | `vmalloc` | 取得連續 kernel virtual address，容易當陣列操作。 | 實體不連續，mmap 需逐頁處理。 |
+| SHM mapping | `vmalloc_to_pfn()` + `remap_pfn_range()` | 展示 page mapping 細節。 | 程式較長，需小心部分映射失敗。 |
+| SHM syscall lock | `spinlock` | 目標是短 critical section。 | 不適合包住可能 sleep 的 user copy。 |
+| SHM mmap sync | `head/tail` + barrier | SPSC ring 最小概念。 | 不支援 MPMC，busy polling 會耗 CPU。 |
+| stats | `procfs` + `seq_file` | 容易 `cat`，輸出多行 key/value。 | 不適合作為穩定 production ABI。 |
+| benchmark concurrency | `pthread` + barrier | 模擬 producer/consumer 並同步起跑。 | 目前 thread API 回傳值未檢查。 |
 
 ---
 
-### 7. Debug / Risk Analysis
+## 第九階段：開發 BUG 與修正紀錄
 
-以下只列目前 code 中能觀察或保守推論出的風險。
+### 1. `class_create()` 參數版本差異
 
-#### Potential Memory Leak / Resource Leak
+| 項目 | 說明 |
+| --- | --- |
+| 現象 | 新 kernel 編譯時，舊式 `class_create(THIS_MODULE, name)` 參數不符。 |
+| 原因 | Linux 6.4 之後 `class_create()` 改成單參數。 |
+| 解法 | 改成 `class_create(MQ_DEVICE "_class")`、`class_create(SHM_DEVICE "_class")`。 |
+| 驗證 | `make -C kernel` 可通過，`/dev/mq_ipc` 與 `/dev/shm_ipc` 可建立。 |
 
-# Direct Observation
+### 2. `vm_flags` 直接寫入不適用新版 kernel
 
-- `shm_init()` 的 init failure path 有 `vfree(g_shm)`，正常 `shm_exit()` 也有 `vfree(g_shm)`。
-- `mq_init()` 沒有 dynamic heap allocation。
-- `proc_create()` 的 return value 在 `mq_init()` 與 `shm_init()` 都沒有檢查，也沒有保存 pointer。
+| 項目 | 說明 |
+| --- | --- |
+| 現象 | 舊寫法直接改 `vma->vm_flags` 在新版 kernel 可能無法編譯。 |
+| 原因 | VMA flags 管理改用 helper。 |
+| 解法 | 使用 `vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP)`。 |
+| 驗證 | `shm_mmap()` 編譯通過，`mmap()` 成功回傳 user pointer。 |
 
-# Conservative Inference
+### 3. `head/tail` false sharing
 
-- `proc_create()` 失敗時 module 仍可能完成載入，但 `/proc/*_stats` 不存在；這不是直接 memory leak，但會造成 registration state 與 script/reporting expectation 不一致。
-- `shm_mmap()` 在 page loop 中若 `remap_pfn_range()` 中途失敗，function 直接回傳 error；目前程式碼中未觀察到 module 自行 rollback 已映射頁面的邏輯。實際 VMA cleanup 由 kernel mmap error path 處理，無法只從本 module 確認完整行為。
+| 項目 | 說明 |
+| --- | --- |
+| 現象 | mmap path throughput 不穩，producer/consumer 雖然改不同欄位仍互相影響。 |
+| 原因 | `head` 與 `tail` 若在同一條 cache line，兩個 CPU 會反覆讓對方 cache line 失效。 |
+| 解法 | 用 padding 將 `head`、`tail` 放在不同 64-byte cache line。 |
+| 驗證 | 觀察 benchmark 結果波動降低；也可用 `offsetof()` 確認 offset。 |
 
-#### Invalid Ownership Transfer / ABI Risk
+### 4. `alignas(64)` 在 kernel C 內不適合直接使用
 
-# Direct Observation
+| 項目 | 說明 |
+| --- | --- |
+| 現象 | 使用 `alignas(64)` 標欄位時，kernel build 環境可能因 C 標準或 header 差異出問題。 |
+| 原因 | kernel C code 通常使用 GCC attribute 或 kernel macro，不假設一般 C11 user-space header 行為。 |
+| 解法 | 改用 `struct __attribute__((aligned(64)))` 與明確 padding。 |
+| 驗證 | kernel module 可正常編譯。 |
 
-- mmap path 讓 user 直接寫 `shm->head.value`、`shm->tail.value` 與 `shm->data`。
-- `user/common.h:shm_region_t` 與 `kernel/shm_module.c:struct shm_region` 手動維持相同 layout。
+### 5. setup script 重複建置 kernel module
 
-# Conservative Inference
+| 項目 | 說明 |
+| --- | --- |
+| 現象 | `scripts/01_setup.sh` 可能先 `cd kernel && make`，後面又 `make -C "${PROJECT_DIR}" kernel`。 |
+| 原因 | 腳本演進時保留了兩條等價建置路徑。 |
+| 解法 | 保留其中一條即可，建議使用 top-level Makefile：`make -C "${PROJECT_DIR}" kernel`。 |
+| 驗證 | setup 輸出只出現一次 kernel build，產物仍有 `mq_module.ko`、`shm_module.ko`。 |
 
-- 目前未觀察到 layout version、magic number、static assert 或 runtime validation；若 user/header 與 kernel module 不同步，user mmap path 可能錯誤解讀 ring metadata。
-- mmap path 沒有 per-slot ownership token；producer/consumer 僅靠 head/tail 協定。若多 producer 或多 consumer 同時使用，目前程式碼中未觀察到可保證正確性的同步機制。
+### 6. `bc` dependency 未明確安裝
 
-#### Callback Misuse Risk
+| 項目 | 說明 |
+| --- | --- |
+| 現象 | `03_benchmark.sh` 顯示資料量時失敗：`bc: command not found`。 |
+| 原因 | script 使用 `bc`，但 dependency 清單可能沒有安裝它。 |
+| 解法 | setup dependency 加入 `bc`，或改用 `awk` 計算。 |
+| 驗證 | `sudo bash scripts/03_benchmark.sh` 可完整輸出 benchmark header。 |
 
-# Direct Observation
+### 7. `copy_from_user()` 在 `spinlock` 內
 
-- `.open` / `.release` 只回 0，沒有 per-open state 或 active mapping tracking。
-- `proc_create()` return value 未檢查。
-- `benchmark.c` 的 `pthread_create()` / `pthread_join()` return value 未檢查。
+| 項目 | 說明 |
+| --- | --- |
+| 現象 | 在 page fault 或特定 debug config 下，可能出現不可睡眠 context 的警告。 |
+| 原因 | `copy_from_user()` 可能觸發 fault，不應包在 `spin_lock()` 區段中。 |
+| 解法 | lock 外先 copy 到 kernel 暫存 buffer，lock 內只更新 ring。 |
+| 驗證 | 用 fault injection 或 lockdep/debug kernel 檢查。 |
 
-# Conservative Inference
+### 8. Fixed-size message 對 short write 沒有嚴格處理
 
-- 若 pthread 建立失敗，`run_test()` 仍可能進行 join 或使用未完成的 timing data；目前 user code 沒有 error propagation。
-- 若 proc entry 建立失敗，`system("cat /proc/*_stats")` 會依 shell command 結果失敗，但 benchmark 本身沒有檢查 `system()` return code。
+| 項目 | 說明 |
+| --- | --- |
+| 現象 | caller 傳小於 64 bytes，module 仍可能 commit 64 bytes。 |
+| 原因 | copy 長度用 `len`，commit 長度用固定 `MSG_SIZE`。 |
+| 解法 | 嚴格要求 `len == MSG_SIZE`，否則回 `-EINVAL`；或先清零 buffer。 |
+| 驗證 | 寫測試：`write(fd, "abc", 3)` 應回 `-EINVAL` 或讀回剩餘 bytes 為 0。 |
 
-#### Lifecycle Mismatch
+### 9. `benchmark.c` error path exit code
 
-# Direct Observation
-
-- `scripts/01_setup.sh` 執行 `make -C "${PROJECT_DIR}" kernel`。
-- `benchmark.c` 的 `mmap()` 失敗會 `goto done`，最後 `return 0`。
-- `scripts/04_cleanup.sh` 依序卸載 `shm_module` 再卸載 `mq_module`，與兩個 module 間目前沒有直接依賴關係。
-
-# Conservative Inference
-
-- `benchmark.c` 在 mmap failure 下回傳 0 可能讓 shell script 誤判 benchmark 成功。
-
-#### Concurrency Issue
-
-# Direct Observation
-
-- `shm_write()` 在 `spin_lock(&g_spin)` 後呼叫 `copy_from_user()`。
-- `copy_from_user()` 可能 fault；這段目前位於 spinlock critical section。
-- SHM mmap path 的 producer/consumer busy-spin 沒有 `sched_yield()`、`pause` 或 blocking primitive。
-- `mq_stats_show()` 直接讀 `kfifo_len()` / `kfifo_avail()`；`shm_stats_show()` 直接讀 `g_shm->head/tail`，未使用對應 lock 包住整個 snapshot。
-
-# Conservative Inference
-
-- 在 kernel 中於 spinlock 內呼叫可能 sleep/fault 的 user copy API 是高風險設計；若發生 page fault 或 sleep 需求，可能違反 spinlock context 的限制。
-- mmap busy-spin 在 ring full/empty 時會消耗 CPU；目前程式碼中未觀察到 timeout 或 backoff。
-- proc stats 讀取可能得到瞬間不一致 snapshot；這影響 debug 數字一致性，不一定影響 data path 正確性。
-
-#### Data Correctness / Partial Message Risk
-
-# Direct Observation
-
-- `mq_write()` 若 caller `len < MSG_SIZE`，只 `copy_from_user(kb, ubuf, len)`，但仍 `kfifo_in(..., MSG_SIZE)` 並回 `MSG_SIZE`。
-- `shm_write()` 若 caller `len < MSG_SIZE`，只 copy `len` bytes 到 slot，但仍更新 `head` 並回 `MSG_SIZE`。
-- `mq_demo.c` 與 `benchmark.c` 實際都以 `MSG_SIZE` 呼叫 write；但 API 本身沒有拒絕 short write。
-
-# Conservative Inference
-
-- 若外部 caller 使用小於 64 bytes 的 write，MQ 的 stack buffer 未填滿部分可能被寫入 FIFO；SHM slot 未覆寫部分可能保留舊資料。這是基於目前 copy 長度與固定 slot commit 行為的保守推論。
-
-#### Latency Statistic Risk
-
-# Direct Observation
-
-- MQ 使用單一 global `st_last_enq_ts`，每次 `mq_write()` 更新；`mq_read()` 以目前讀取時間減去這個 global timestamp。
-- SHM 使用單一 global `st_last_wr_ts`，每次 `shm_write()` 更新；`shm_read()` 以目前讀取時間減去這個 global timestamp。
-
-# Conservative Inference
-
-- 當 queue/ring 中累積多筆 message 時，read latency 不一定對應該筆 message 的 enqueue/write timestamp；因此 `/proc/*_stats` 的 average latency 比較接近「最後一次 write 到 read 的差值累積」，不是 per-message latency。
-- mmap path 每筆 message 不呼叫 kernel `shm_write()` / `shm_read()`，所以 `/proc/shm_stats` 的 `writes/reads` 不會反映 mmap worker 的每筆 user-space head/tail 操作。
+| 項目 | 說明 |
+| --- | --- |
+| 現象 | `mmap()` 失敗後可能仍回傳 0。 |
+| 原因 | cleanup label 沒有保留錯誤狀態。 |
+| 解法 | 加入 `int rc`，錯誤時設為 1，最後 `return rc`。 |
+| 驗證 | 暫時讓 `/dev/shm_ipc` 不存在，確認 script 收到非 0 exit code。 |
 
 ---
 
-### 8. Conservative Inference Summary
+## 第十階段：已知限制與後續改善
 
-- 目前程式碼展示的是單一 module-global queue/ring，而非 per-client IPC channel。
-- mmap path 的主要成本差異來自避開每筆 syscall dispatch 與 user/kernel copy。
-- SHM mmap ring 依賴 single producer / single consumer 形式的 head/tail 協定；目前程式碼中未觀察到 multi-producer / multi-consumer 的正確性保護。
-- `/proc/*_stats` 可用於觀察 module counters，但 latency 與 snapshot 一致性都有目前實作上的限制。
+# Risk / TODO
+
+| 限制 | 影響 | 改善方向 |
+| --- | --- | --- |
+| mmap ring 只適合 SPSC | 多 producer/consumer 可能覆寫或讀錯 slot。 | 加入 CAS、per-slot sequence number 或 mutex/futex。 |
+| shared layout 手動維護 | kernel/user ABI 容易不同步。 | 共用 header、`offsetof()` 檢查、layout version。 |
+| proc stats 非完整 tracing | mmap per-message 不會更新 kernel write/read count。 | user-space counter 或 tracepoint。 |
+| busy polling 耗 CPU | ring empty/full 時會持續佔用 CPU。 | backoff、`sched_yield()`、futex。 |
+| user copy 在 spinlock 內 | debug kernel 可能警告，語意不安全。 | lock 外 user copy，lock 內只操作 shared state。 |
+| thread return value 未檢查 | benchmark error path 可能不明確。 | 檢查 `pthread_create()`、`pthread_join()`、barrier API 回傳值。 |
 
 ---
 
-## 結論
+## 總結
 
-# Direct Observation
+`linux-ipc-benchmark` 透過兩個 char device kernel module，把 IPC 成本拆成三條可比較的 runtime path：
 
-`linux-ipc-benchmark` 目前實作了兩個 kernel char device module 與三條可比較的 IPC runtime path：
+1. MQ syscall：`kfifo` + `mutex` + `wait_queue`，語意清楚，但每筆訊息有 syscall 與 user/kernel copy。
+2. SHM syscall：`vmalloc` ring + `spinlock`，底層是 shared ring，但每筆訊息仍透過 syscall 複製。
+3. SHM mmap：`vmalloc` pages 經 `remap_pfn_range()` 映射到 user，runtime 直接操作 shared region，減少每筆 syscall 與 user/kernel copy。
 
-1. `/dev/mq_ipc`：`kfifo` + `mutex` + `wait_queue` 的 blocking Message Queue。
-2. `/dev/shm_ipc` syscall：`vmalloc` ring + `spinlock` + `copy_from_user/copy_to_user`。
-3. `/dev/shm_ipc` mmap：`vmalloc` backing pages 經 `remap_pfn_range()` 映射到 user，由 user-space thread 直接操作 `head/tail/data`。
-
-主要 callback chain 由 `struct file_operations`、`struct proc_ops` 與 `pthread_create()` start routine 組成；主要 ownership 差異在於 MQ/SHM syscall path 都不移交 pointer ownership，而 mmap path 讓 user 取得 shared VMA 並直接參與 ring state transition。
-
-# Conservative Inference
-
-目前 code 的核心價值是以可執行的 minimal module 對比 IPC dispatch、copy count、blocking/spinning 與 memory sharing 成本；但若要作為更一般化 IPC framework，還需要補強 short write handling、spinlock 中 user copy、mmap lifetime tracking、thread/system call error propagation，以及 multi-client concurrency 語意。
+API 選擇的核心取捨是：MQ 讓 kernel 管理等待與資料移交；mmap shared memory 讓 user space 取得速度，但同步、layout、錯誤處理也變成使用者與 module 必須共同維護的責任。

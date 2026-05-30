@@ -1,14 +1,12 @@
 #!/bin/bash
-# 07_fix_busybox_arch.sh
+# 建置 ARM64 static BusyBox，供 initramfs 使用。
 #
-# 問題：initramfs 裡的 busybox 是 x86-64，
-#       ARM64 kernel 無法執行 /bin/sh，導致 init 直接失敗。
-# 解法：從 source 交叉編譯出 ARM64 static busybox，
-#       放到 tools/busybox-aarch64，供 04_build_rootfs.sh 使用。
+# 背景：ARM64 kernel 不能執行 x86-64 BusyBox。
+# 產物：tools/busybox-aarch64，供 scripts/04_build_rootfs.sh 自動取用。
 
 set -euo pipefail
 
-# ── 顏色 ────────────────────────────────────────────────────────────
+# 顏色輸出：只讓步驟訊息比較容易讀。
 RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'
 CYAN='\033[0;36m'; NC='\033[0m'
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
@@ -16,7 +14,7 @@ warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 die()     { echo -e "${RED}[ERR]${NC}   $*"; exit 1; }
 
-# ── 路徑：scripts/ 的上一層就是專案根目錄 ──────────────────────────
+# scripts/ 的上一層就是專案根目錄，後續路徑都從這裡展開。
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
@@ -28,9 +26,7 @@ TOOLS_DIR="${PROJECT_ROOT}/tools"
 OUTPUT="${TOOLS_DIR}/busybox-aarch64"
 CROSS="aarch64-linux-gnu-"
 
-# ════════════════════════════════════════════════════════════════════
 info "=== Step 1: 確認 cross-compiler ==="
-# ════════════════════════════════════════════════════════════════════
 if ! command -v ${CROSS}gcc &>/dev/null; then
     warn "${CROSS}gcc 不存在，嘗試安裝 ..."
     sudo apt-get install -y gcc-aarch64-linux-gnu \
@@ -38,9 +34,7 @@ if ! command -v ${CROSS}gcc &>/dev/null; then
 fi
 info "Cross-compiler: $(${CROSS}gcc --version | head -1)"
 
-# ════════════════════════════════════════════════════════════════════
 info "=== Step 2: 下載 BusyBox ${BUSYBOX_VER} source ==="
-# ════════════════════════════════════════════════════════════════════
 if [ ! -f "${BUSYBOX_TAR}" ]; then
     info "下載 ${BUSYBOX_URL} ..."
     wget -q --show-progress "${BUSYBOX_URL}" \
@@ -56,16 +50,12 @@ fi
 
 cd "${BUSYBOX_DIR}"
 
-# ════════════════════════════════════════════════════════════════════
 info "=== Step 3: defconfig (ARM64) ==="
-# ════════════════════════════════════════════════════════════════════
 make ARCH=arm64 CROSS_COMPILE="${CROSS}" defconfig \
     || die "defconfig 失敗"
 
-# ════════════════════════════════════════════════════════════════════
 info "=== Step 4: 強制 static linking ==="
-# ════════════════════════════════════════════════════════════════════
-# defconfig 預設是動態連結，initramfs 裡沒有 libc.so，必須 static
+# initramfs 沒有動態 linker/libc，所以 BusyBox 必須 static link。
 if grep -q "# CONFIG_STATIC is not set" .config; then
     sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
 elif ! grep -q "CONFIG_STATIC=y" .config; then
@@ -76,10 +66,8 @@ grep "CONFIG_STATIC" .config | grep -v "LIBGCC" \
     && success "CONFIG_STATIC=y 確認" \
     || die "CONFIG_STATIC 設定失敗"
 
-# ════════════════════════════════════════════════════════════════════
 info "=== Step 5: 關掉會編譯失敗的 applet ==="
-# ════════════════════════════════════════════════════════════════════
-# tc applet 用到 kernel header 裡不完整的結構體，ARM64 cross-build 會炸
+# tc applet 依賴較複雜的 network headers；本 demo 不需要，直接關閉。
 BROKEN_APPLETS=("CONFIG_TC")
 
 for applet in "${BROKEN_APPLETS[@]}"; do
@@ -91,23 +79,19 @@ for applet in "${BROKEN_APPLETS[@]}"; do
     fi
 done
 
-# ════════════════════════════════════════════════════════════════════
 info "=== Step 6: 編譯 ($(nproc) jobs) ==="
-# ════════════════════════════════════════════════════════════════════
 make ARCH=arm64 CROSS_COMPILE="${CROSS}" -j"$(nproc)" 2>&1 \
     | tee /tmp/busybox_build.log \
     | grep -E "^(  (LINK|STRIP|CC)|make\[|networking/tc|error:)" || true
 
-# 確認 binary 真的產生了
+# 編譯 log 已被篩選顯示；失敗時再提示完整 log 位置。
 if [ ! -f "busybox" ]; then
     warn "busybox binary 不存在，查看完整 log："
     tail -30 /tmp/busybox_build.log
     die "編譯失敗，詳細 log 在 /tmp/busybox_build.log"
 fi
 
-# ════════════════════════════════════════════════════════════════════
 info "=== Step 7: 驗證架構 ==="
-# ════════════════════════════════════════════════════════════════════
 FILEINFO=$(file busybox)
 info "file output: ${FILEINFO}"
 
@@ -123,21 +107,17 @@ else
     die "不是 static binary！initramfs 執行會失敗"
 fi
 
-# ════════════════════════════════════════════════════════════════════
 info "=== Step 8: 複製到 tools/ ==="
-# ════════════════════════════════════════════════════════════════════
 mkdir -p "${TOOLS_DIR}"
 cp busybox "${OUTPUT}"
 chmod +x "${OUTPUT}"
 
-success "BusyBox ARM64 binary → ${OUTPUT}"
+success "BusyBox ARM64 binary: ${OUTPUT}"
 
-# ════════════════════════════════════════════════════════════════════
-info "=== Step 9: 請自行更新 04_build_rootfs.sh 的 BUSYBOX 路徑 ==="
-echo -e "例如:"
-echo -e "BUSYBOX=~/桌面/Linux-kernel/qemu-platform-demo/busybox-1.36.1/busybox"
+info "=== Step 9: Rootfs builder input ==="
+echo "scripts/04_build_rootfs.sh 會自動使用 ${OUTPUT}。"
+echo "若要改用其他 BusyBox，可設定 BUSYBOX=/path/to/aarch64/busybox。"
 
-# ════════════════════════════════════════════════════════════════════
 echo ""
 echo -e "${GREEN}════════════════════════════════════════${NC}"
 echo -e "${GREEN}  BusyBox ARM64 build 完成！            ${NC}"
