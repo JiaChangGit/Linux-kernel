@@ -10,13 +10,13 @@
 
 > 同樣傳 64 bytes 訊息時，Message Queue 與 Shared Memory 的成本差在哪裡？
 
-為了讓差異可觀察，專案刻意實作三條路徑：
+為了讓差異可觀察，專案刻意實作三條路徑。正式 benchmark 只有這三種測試；`copy_from_user()`、`copy_to_user()`、`spinlock` 是 SHM syscall 的實作細節，不是第四種測試。
 
 | 路徑 | 實作位置 | 說明 |
 | --- | --- | --- |
-| MQ syscall | `kernel/mq_module.c` | 使用 `kfifo` 保存訊息，user 透過 `write()` / `read()` 存取。 |
-| SHM syscall | `kernel/shm_module.c` | 使用同一份 shared ring，但仍透過 `write()` / `read()` 存取。 |
-| SHM mmap | `kernel/shm_module.c` + `user/common.h` | kernel 配置 shared region，user 透過 `mmap()` 取得指標後直接讀寫。 |
+| MQ syscall | `kernel/mq_module.c` | 使用 `kfifo` 保存訊息，user 透過 `write()` / `read()` 存取，每筆訊息有 user/kernel copy。 |
+| SHM syscall | `kernel/shm_module.c` | 使用 kernel 端 `struct shm_region` ring，user 仍透過 `write()` / `read()` 存取；目前 `shm_write()` 在 `spinlock` 內做 `copy_from_user()`，這是已知風險。 |
+| SHM mmap | `kernel/shm_module.c` + `user/common.h` | kernel 把 `vmalloc` pages 映射到 user VMA，user 透過 `shm_region_t` 直接讀寫 mapped page；每筆訊息不走 `read/write` syscall，也不走 `copy_from_user()` / `copy_to_user()`。 |
 
 這三條路徑不是要證明哪一種 API 永遠最好，而是拆開觀察三個成本來源：
 
@@ -61,6 +61,33 @@ userspace
 
 `/proc/mq_stats` 與 `/proc/shm_stats` 用來觀察 kernel module 的統計資料，例如 enqueue/dequeue count、write/read count、ring used slots、average latency。
 
+```mermaid
+flowchart TB
+    subgraph MQ["1. MQ syscall"]
+        MQP["producer"] --> MQW["write(/dev/mq_ipc)"]
+        MQW --> MQCFU["copy_from_user()"]
+        MQCFU --> KF["kfifo"]
+        KF --> MQCTU["copy_to_user()"]
+        MQCTU --> MQR["read(/dev/mq_ipc)"]
+        MQR --> MQC["consumer"]
+    end
+
+    subgraph SHMS["2. SHM syscall"]
+        SP["producer"] --> SW["write(/dev/shm_ipc)"]
+        SW --> SL["spin_lock() + copy_from_user()"]
+        SL --> KR["kernel shm_region data offset 136"]
+        KR --> SR["memcpy(tmp) + copy_to_user()"]
+        SR --> RR["read(/dev/shm_ipc)"]
+        RR --> SC["consumer"]
+    end
+
+    subgraph SHMM["3. SHM mmap"]
+        MP["producer"] --> UM["user shm_region_t data offset 192"]
+        UM --> VP["mapped vmalloc pages"]
+        VP --> MC["consumer"]
+    end
+```
+
 ---
 
 ## 4. 三條資料路徑
@@ -94,9 +121,9 @@ consumer user buffer
 
 這條路徑的好處是語意清楚：滿了可以等、空了可以等，呼叫端不用自己寫輪詢。但每筆訊息都要進核心，也要複製資料。
 
-### 4.2 SHM syscall：共享 ring 但仍使用 `read()` / `write()`
+### 4.2 SHM syscall：kernel ring 但仍使用 `read()` / `write()`
 
-SHM 模組提供 `/dev/shm_ipc`。它底層使用 `vmalloc()` 配置一份 ring buffer，但 syscall path 仍透過 `shm_write()` / `shm_read()` 搬移資料。
+SHM 模組提供 `/dev/shm_ipc`。它底層使用 `vmalloc()` 配置一份 kernel 端 ring buffer，但 syscall path 仍透過 `shm_write()` / `shm_read()` 搬移資料。
 
 ```text
 producer user buffer
@@ -120,8 +147,9 @@ consumer user buffer
 - ring full 時 `shm_write()` 回傳 `-ENOSPC`。
 - ring empty 時 `shm_read()` 回傳 `-EAGAIN`。
 - 仍有兩次 user/kernel 資料複製。
+- 目前 `copy_from_user()` 在 `spin_lock()` 之後執行，這個設計有不可睡眠 context 的風險，適合當教學對照，不應描述成 production-ready 寫法。
 
-這條路徑的用途是做對照：底層換成 shared ring 之後，如果還是每筆訊息都 syscall 並複製資料，效能不會只因為名字叫 shared memory 就自然變快。
+這條路徑的用途是做對照：底層換成 kernel 端 ring buffer 之後，如果還是每筆訊息都 syscall 並複製資料，效能不會只因為名字叫 shared memory 就自然變快。
 
 ### 4.3 SHM mmap：共享頁面 + user-space ring
 
@@ -146,10 +174,28 @@ runtime:
 
 - 每筆訊息不再呼叫 `read()` / `write()`。
 - 每筆訊息不走 `copy_from_user()` / `copy_to_user()`。
+- producer 仍會用 `memcpy()` 把資料寫進 mapped page，consumer 也會用 `memcpy()` 取出快照；這裡的 zero-copy 只是不跨 user/kernel 邊界複製。
 - producer 與 consumer 要自己處理 full/empty 判斷。
 - 需要 memory barrier，確保資料寫入發生在 `head` 更新之前。
+- 目前使用 `volatile` 與 `__sync_synchronize()`，不是完整 C11 atomic SPSC queue，也不支援多 producer / 多 consumer。
 
 這條路徑的重點是 zero-copy，而不是「完全沒有成本」。它仍然有 cache、memory ordering、busy polling、CPU 排程等成本。
+
+### 4.4 SHM ABI 現況：兩條 SHM path 不應混用資料 slot
+
+`SHM syscall` 與 `SHM mmap` 都來自 `/dev/shm_ipc` 和同一份 `g_shm` backing pages，但目前 kernel 與 user 對 `data` 欄位的 offset 不一致：
+
+| Layout | `head` | `tail` | metadata | `data` |
+| --- | ---: | ---: | ---: | ---: |
+| kernel `struct shm_region` | 0 | 64 | `capacity=128`, `msg_size=132` | 136 |
+| user `shm_region_t` | 0 | 64 | `meta=128..191` | 192 |
+
+因此文件不能說「SHM syscall 和 SHM mmap 完全使用同一個 shared ring layout」。比較精準的說法是：
+
+- 兩條路徑共用同一個 device 與同一份 mapped backing pages。
+- `head` / `tail` offset 相同，所以 ring index 可被雙方看到。
+- `data` offset 不同，所以目前不應混用「syscall path 寫資料、mmap path 讀資料」或反過來。
+- benchmark 的第 3 種測試由 user producer / user consumer 都依照 `user/common.h` 的 layout 操作，因此可獨立觀察 mmap path 成本。
 
 ---
 
@@ -158,7 +204,7 @@ runtime:
 | 比較 | 可以觀察什麼 |
 | --- | --- |
 | MQ syscall vs SHM syscall | 同樣有兩次資料複製，但 queue 結構與同步方式不同。 |
-| SHM syscall vs SHM mmap | 底層同樣是 shared ring，但 mmap 取消每筆 syscall 與 user/kernel copy。 |
+| SHM syscall vs SHM mmap | 同樣經由 `/dev/shm_ipc`，但 SHM syscall 每筆進 kernel 並複製資料；SHM mmap 只在 setup 進 kernel，runtime 直接操作 mapped page。注意目前兩者 `data` offset 不一致，不應把資料 slot 混用。 |
 | `/proc/mq_stats` vs `/proc/shm_stats` | kernel 模組內部統計是否符合 benchmark 執行狀態。 |
 
 注意事項：
@@ -431,6 +477,6 @@ benchmark 類程式的 exit code 很重要，因為它通常會被 script 或 CI
 
 ## 9. 小結
 
-本專案的核心價值在於把 IPC 成本拆成可觀察的幾層：syscall、copy、queue/ring、同步、cache。MQ path 呈現傳統 syscall IPC 的成本；SHM syscall path 用來隔離 queue 結構差異；SHM mmap path 則展示 zero-copy 需要付出的同步與 ABI 管理責任。
+本專案的核心價值在於把 IPC 成本拆成可觀察的幾層：syscall、copy、queue/ring、同步、cache。MQ path 呈現傳統 syscall IPC 的成本；SHM syscall path 用來隔離 queue/ring 結構差異；SHM mmap path 則展示避開每筆 user/kernel copy 後，必須自行承擔同步與 ABI 管理責任。
 
 共享記憶體不是「自動比較快」，而是把資料搬移責任從 kernel 轉到使用者空間。當資料路徑清楚、同步規則正確、layout 一致時，它可以減少每筆訊息的 syscall 與資料複製成本；如果同步或 layout 沒處理好，錯誤也會更難查。

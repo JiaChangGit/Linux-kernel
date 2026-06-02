@@ -463,7 +463,7 @@ flowchart TD
 選擇依據：
 
 - `struct myled_priv` 的生命週期和 device 相同。
-- `probe()` 中途可能因為 resource、sysfs、初始化失敗而返回。
+- `probe()` 中途可能因為 resource、sysfs、初始化失敗而回傳錯誤。
 - 用 `devm_kzalloc()` 可以減少「某個錯誤分支忘記 `kfree()`」的風險。
 
 ### `platform_get_resource()` 與相關 API

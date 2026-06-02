@@ -33,7 +33,7 @@
 | Kernel build | `kernel/Makefile` | 產生 `mq_module.ko` 與 `shm_module.ko`。 |
 | User source | `user/benchmark.c` | 建立 producer / consumer pthread，比較三條 IPC 路徑。 |
 | User source | `user/mq_demo.c` | 示範 `/dev/mq_ipc` 的小量 `write()` / `read()`。 |
-| User source | `user/shm_demo.c` | 示範 `/dev/shm_ipc` 的 `mmap()` 與 shared ring 操作。 |
+| User source | `user/shm_demo.c` | 示範 `/dev/shm_ipc` 的 `mmap()` 與 mapped region 操作。 |
 | Header | `user/common.h` | 定義 user-space 共用常數、device path、`shm_region_t`、`now_us()`。 |
 | Script | `scripts/01_setup.sh` | 安裝依賴、建置、載入 module、設定 device 權限。 |
 | Script | `scripts/02_demo.sh` | 逐步執行 MQ 與 SHM mmap demo。 |
@@ -68,6 +68,22 @@ flowchart TD
 # Conservative Inference
 
 專案的比較軸線不是「Linux 內建 MQ vs Linux 內建 SHM」，而是「同一個專案中自行實作的三條資料路徑」。因此報告中的效能解讀只應對應這份 codebase，不應直接推論所有 IPC API。
+
+### 3. Benchmark 測試項目
+
+# Direct Observation
+
+`user/benchmark.c` 的正式測試共有三項：
+
+| 編號 | benchmark 標籤 | worker | device/API | Kernel path | 每筆訊息資料搬移 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `Message Queue (kfifo + blocking syscall)` | `syscall_worker()` | `/dev/mq_ipc` + `write/read` | `mq_write()` / `mq_read()` + `kfifo` | `copy_from_user()` + `copy_to_user()` |
+| 2 | `Shared Memory (ring-buf + syscall, spinlock)` | `syscall_worker()` | `/dev/shm_ipc` + `write/read` | `shm_write()` / `shm_read()` + kernel `struct shm_region` | `copy_from_user()` + `copy_to_user()` |
+| 3 | `Shared Memory (ring-buf + mmap, ZERO-COPY)` | `mmap_worker()` | `/dev/shm_ipc` + `mmap` | `shm_mmap()` 建立 mapping；runtime 不進 kernel | 無 `copy_from_user()` / `copy_to_user()`；仍有 user-space `memcpy()` |
+
+# Conservative Inference
+
+第二項不是另一種 zero-copy shared memory，而是 syscall 對照組。它使用 `spinlock` 和 kernel 端 ring buffer，但每筆訊息仍進 kernel，也仍做 user/kernel copy。
 
 ---
 
@@ -109,7 +125,7 @@ sequenceDiagram
     participant P as Producer user thread
     participant V as VFS syscall layer
     participant S as shm_module.c
-    participant R as g_shm ring buffer
+    participant R as kernel shm_region ring
     participant C as Consumer user thread
 
     P->>V: write(fd, msg, 64)
@@ -130,25 +146,26 @@ sequenceDiagram
 
 重點：
 
-- 底層 storage 是 shared ring，但 user 還是透過 syscall 存取。
+- 底層 storage 是 kernel 端 `struct shm_region` ring，但 user 還是透過 syscall 存取。
 - 此路徑仍有 user/kernel copy。
 - ring full 回 `-ENOSPC`，ring empty 回 `-EAGAIN`。
+- `copy_from_user()` 目前在 `spin_lock()` 之後執行，這是已知風險，不應描述成嚴謹的 production 同步設計。
 
 ### 3. SHM mmap path
 
 ```mermaid
 flowchart LR
     subgraph Kernel
-        G["g_shm: vmalloc ring buffer"]
+        G["g_shm: vmalloc pages"]
         M["shm_mmap()"]
         P1["vmalloc_to_pfn()"]
         P2["remap_pfn_range()"]
     end
 
     subgraph User
-        U["shm_region_t *shm"]
-        Prod["producer writes data[head]"]
-        Cons["consumer reads data[tail]"]
+        U["shm_region_t *shm<br/>user data offset 192"]
+        Prod["producer memcpy to data[head]"]
+        Cons["consumer memcpy from data[tail]"]
     end
 
     G --> M --> P1 --> P2 --> U
@@ -173,8 +190,9 @@ Ring state:
 重點：
 
 - `mmap()` 完成後，每筆訊息不再進 kernel。
-- producer 與 consumer 直接讀寫同一段 mapped pages。
+- producer 與 consumer 直接讀寫 mapped pages，但資料仍會在 user space 用 `memcpy()` 放入或取出。
 - 正確性依賴 `head/tail` 協定與 memory barrier。
+- 目前 mmap path 使用 `user/common.h` 的 `shm_region_t` layout；它的 `data` offset 是 192，和 kernel `struct shm_region` 的 `data` offset 136 不一致。因此不要把 syscall path 和 mmap path 的資料 slot 混用。
 
 ---
 
@@ -255,7 +273,7 @@ alloc_chrdev_region()
 | `.release` | `mq_release` | `shm_release` | `close(fd)` | 目前只回 0。 |
 | `.write` | `mq_write` | `shm_write` | `write(fd, buf, len)` | producer path。 |
 | `.read` | `mq_read` | `shm_read` | `read(fd, buf, len)` | consumer path。 |
-| `.mmap` | 無 | `shm_mmap` | `mmap(fd)` | 只有 SHM module 提供 zero-copy setup。 |
+| `.mmap` | 無 | `shm_mmap` | `mmap(fd)` | 只有 SHM module 提供 mapped-page setup；zero-copy 在本專案限定指沒有每筆 user/kernel copy。 |
 
 類似 API 比較：
 
@@ -263,7 +281,7 @@ alloc_chrdev_region()
 | --- | --- | --- |
 | `read/write` | byte stream、簡單 request/response、容易用 shell 工具測 | 有 |
 | `ioctl` | 控制命令、設定參數、查詢 metadata | 無，目前不需要 command set |
-| `mmap` | 大量資料共享、zero-copy、使用者直接操作 buffer | 有，SHM path 核心 |
+| `mmap` | 大量資料共享、避免每筆 user/kernel copy、使用者直接操作 mapped page | 有，SHM mmap path 核心 |
 | `poll/select/epoll` | 等待 fd 可讀可寫 | 無，MQ 用 kernel wait queue；SHM mmap 用 user polling |
 
 ### 4. Procfs / stats API
@@ -345,7 +363,7 @@ alloc_chrdev_region()
 | `open()` | demos、benchmark | 開啟 `/dev/mq_ipc`、`/dev/shm_ipc`。 | 失敗常見原因是 module 未載入或權限不足。 |
 | `write()` | MQ/SHM syscall worker | producer 送出 64 bytes。 | 目前 module protocol 建議固定 `MSG_SIZE`。 |
 | `read()` | MQ/SHM syscall worker | consumer 讀取 64 bytes。 | MQ 可 blocking；SHM syscall empty 回 `EAGAIN`。 |
-| `mmap()` | `shm_demo.c`、`benchmark.c` | 取得 shared ring pointer。 | 需要 `MAP_SHARED`，否則不符合 shared memory 語意。 |
+| `mmap()` | `shm_demo.c`、`benchmark.c` | 取得 mapped region pointer，並以 `user/common.h` 的 `shm_region_t` 解讀。 | 需要 `MAP_SHARED`；目前 user/kernel `data` offset 不一致，不能把 syscall path 與 mmap path 的資料 slot 混用。 |
 | `munmap()` | cleanup | 解除 user mapping。 | 不會釋放 kernel `g_shm`，kernel memory 由 module 管。 |
 | `pthread_create()` | `benchmark.c` | 建立 producer / consumer。 | 目前 return value 未檢查。 |
 | `pthread_barrier_wait()` | workers | 讓 producer/consumer 同步起跑。 | 減少 benchmark 起跑偏差。 |
@@ -524,7 +542,14 @@ shm_region_t
 
 # Risk / TODO
 
-目前 kernel 與 user 對 `data` 的 offset 不一致。mmap demo 與 benchmark 的 mmap path 主要由 user producer 與 user consumer 同時依照 user layout 操作，因此不一定立刻失敗。但若未來要混用 syscall path 與 mmap path，或讓 kernel 解讀 user mmap 寫入的 data slot，就會有 ABI mismatch 風險。
+目前 kernel 與 user 對 `data` 的 offset 不一致：
+
+```text
+kernel data offset = 136
+user   data offset = 192
+```
+
+mmap demo 與 benchmark 的 mmap path 主要由 user producer 與 user consumer 同時依照 user layout 操作，因此不一定立刻失敗。但若未來要混用 syscall path 與 mmap path，或讓 kernel 解讀 user mmap 寫入的 data slot，就會有 ABI mismatch 風險。
 
 建議修正：
 
@@ -567,7 +592,7 @@ shm_region_t
 | SHM allocation | `vmalloc` | 取得連續 kernel virtual address，容易當陣列操作。 | 實體不連續，mmap 需逐頁處理。 |
 | SHM mapping | `vmalloc_to_pfn()` + `remap_pfn_range()` | 展示 page mapping 細節。 | 程式較長，需小心部分映射失敗。 |
 | SHM syscall lock | `spinlock` | 目標是短 critical section。 | 不適合包住可能 sleep 的 user copy。 |
-| SHM mmap sync | `head/tail` + barrier | SPSC ring 最小概念。 | 不支援 MPMC，busy polling 會耗 CPU。 |
+| SHM mmap sync | `head/tail` + `volatile` + `__sync_synchronize()` | SPSC ring 最小概念。 | 不是完整 C11 atomic queue，不支援 MPMC，busy polling 會耗 CPU。 |
 | stats | `procfs` + `seq_file` | 容易 `cat`，輸出多行 key/value。 | 不適合作為穩定 production ABI。 |
 | benchmark concurrency | `pthread` + barrier | 模擬 producer/consumer 並同步起跑。 | 目前 thread API 回傳值未檢查。 |
 
@@ -678,7 +703,7 @@ shm_region_t
 `linux-ipc-benchmark` 透過兩個 char device kernel module，把 IPC 成本拆成三條可比較的 runtime path：
 
 1. MQ syscall：`kfifo` + `mutex` + `wait_queue`，語意清楚，但每筆訊息有 syscall 與 user/kernel copy。
-2. SHM syscall：`vmalloc` ring + `spinlock`，底層是 shared ring，但每筆訊息仍透過 syscall 複製。
-3. SHM mmap：`vmalloc` pages 經 `remap_pfn_range()` 映射到 user，runtime 直接操作 shared region，減少每筆 syscall 與 user/kernel copy。
+2. SHM syscall：`vmalloc` pages 上的 kernel `struct shm_region` ring + `spinlock`，每筆訊息仍透過 syscall 與 user/kernel copy。
+3. SHM mmap：`vmalloc` pages 經 `remap_pfn_range()` 映射到 user，runtime 直接操作 `shm_region_t`，減少每筆 syscall 與 user/kernel copy；目前 user/kernel `data` offset 不一致，所以不能把兩條 SHM path 的資料 slot 混用。
 
 API 選擇的核心取捨是：MQ 讓 kernel 管理等待與資料移交；mmap shared memory 讓 user space 取得速度，但同步、layout、錯誤處理也變成使用者與 module 必須共同維護的責任。
