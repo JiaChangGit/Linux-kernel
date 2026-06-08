@@ -29,7 +29,7 @@ WRITE LPN 10
 | 策略 | English | 優點 | 限制 | 本專案選擇 |
 | --- | --- | --- | --- | --- |
 | 頁級映射 | Page-level Mapping | 每個 LPN 都能獨立更新，適合 random write。 | mapping table 較大。 | 採用，因為最容易示範 out-of-place update 與 GC migration。 |
-| 區塊級映射 | Block-level Mapping | mapping table 小。 | 小寫入容易造成大量搬移。 | 未採用，會讓教學重點變成 merge policy。 |
+| 區塊級映射 | Block-level Mapping | mapping table 小。 | 小寫入容易造成大量搬移。 | 未採用，會讓重點變成 merge policy。 |
 | 混合映射 | Hybrid Mapping | 實務上常見，能折衷空間與效能。 | 程式複雜，需 log block / data block 管理。 | 後續可延伸。 |
 
 ## 重要限制

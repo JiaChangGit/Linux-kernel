@@ -37,4 +37,4 @@ gc_run()
 
 - **L2P 更新**：valid page 搬到新 PPA 後，一定要更新 mapping；否則 victim erase 後，LPN 會指到錯的位置。
 - **長請求與保留空間**：很長的 WRITE request 可能消耗掉 GC migration 所需的 free pages，因此 write loop 中會提早檢查 `gc_needed()`。
-- **Foreground vs Background GC**：目前 background GC 不是獨立執行緒，而是 request path 內同步執行；文件不能把它描述成真正背景 thread。
+- **Foreground vs Background GC**：目前 background GC 在 request path 內同步執行，沒有獨立執行緒；文件應避免把它描述成真正背景 thread。

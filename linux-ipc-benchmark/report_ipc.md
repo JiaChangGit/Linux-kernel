@@ -18,7 +18,7 @@
 | SHM syscall | `kernel/shm_module.c` | 使用 kernel 端 `struct shm_region` ring，user 仍透過 `write()` / `read()` 存取；目前 `shm_write()` 在 `spinlock` 內做 `copy_from_user()`，這是已知風險。 |
 | SHM mmap | `kernel/shm_module.c` + `user/common.h` | kernel 把 `vmalloc` pages 映射到 user VMA，user 透過 `shm_region_t` 直接讀寫 mapped page；每筆訊息不走 `read/write` syscall，也不走 `copy_from_user()` / `copy_to_user()`。 |
 
-這三條路徑不是要證明哪一種 API 永遠最好，而是拆開觀察三個成本來源：
+這三條路徑用來拆開觀察三個成本來源：
 
 1. 資料複製次數（Data Copy Count）
 2. 系統呼叫次數（System Call Count）
@@ -147,7 +147,7 @@ consumer user buffer
 - ring full 時 `shm_write()` 回傳 `-ENOSPC`。
 - ring empty 時 `shm_read()` 回傳 `-EAGAIN`。
 - 仍有兩次 user/kernel 資料複製。
-- 目前 `copy_from_user()` 在 `spin_lock()` 之後執行，這個設計有不可睡眠 context 的風險，適合當教學對照，不應描述成 production-ready 寫法。
+- 目前 `copy_from_user()` 在 `spin_lock()` 之後執行，這個設計有不可睡眠 context 的風險，適合作為對照路徑，不應描述成 production-ready 寫法。
 
 這條路徑的用途是做對照：底層換成 kernel 端 ring buffer 之後，如果還是每筆訊息都 syscall 並複製資料，效能不會只因為名字叫 shared memory 就自然變快。
 
@@ -217,7 +217,7 @@ runtime:
 
 ## 6. API 選用理由摘要
 
-更完整的 API 教學與比較在 [report_ipc_api.md](report_ipc_api.md)。這裡先整理主要取捨。
+更完整的 API 比較在 [report_ipc_api.md](report_ipc_api.md)。這裡先整理主要取捨。
 
 | 選用 | 類似選項 | 選用原因 |
 | --- | --- | --- |
@@ -255,7 +255,7 @@ g_class = class_create(SHM_DEVICE "_class");
 
 分析：
 
-這是 kernel API 變動，不是邏輯錯誤。寫 kernel module 時不能只看舊教學，要對照目標 kernel 的 header。這也是專案文件要寫清楚 kernel 版本的原因。
+這是 kernel API 變動，不是邏輯錯誤。寫 kernel module 時不能只看舊資料，要對照目標 kernel 的 header。這也是專案文件要寫清楚 kernel 版本的原因。
 
 ### 7.2 Linux kernel API 版本差異：`vm_flags`
 
@@ -303,7 +303,7 @@ uint8_t pad2[60];
 
 分析：
 
-`head` 與 `tail` 的資料量很小，但更新頻率很高。這種欄位比大資料本身更容易造成 cache coherence 成本。padding 不是為了節省記憶體，而是為了讓高頻更新欄位不要互相干擾。
+`head` 與 `tail` 的資料量很小，但更新頻率很高。這種欄位比大資料本身更容易造成 cache coherence 成本。padding 的目的是隔離高頻更新欄位，降低彼此干擾。
 
 ### 7.4 user/kernel shared layout 不同步的風險
 
@@ -359,7 +359,7 @@ shm_write():
 
 分析：
 
-如果目標是安全性與可維護性，應避免 user copy 在 spinlock 內。若擔心多一次 `memcpy()` 影響比較結果，可以在文件中註明這條 syscall path 是教學對照用，並另外保留 mmap path 作為 zero-copy 主軸。
+如果目標是安全性與可維護性，應避免 user copy 在 spinlock 內。若擔心多一次 `memcpy()` 影響比較結果，可以在文件中註明這條 syscall path 是對照用，並另外保留 mmap path 作為 zero-copy 主軸。
 
 ### 7.6 Short write 造成未定義資料被送入 slot
 
@@ -479,4 +479,4 @@ benchmark 類程式的 exit code 很重要，因為它通常會被 script 或 CI
 
 本專案的核心價值在於把 IPC 成本拆成可觀察的幾層：syscall、copy、queue/ring、同步、cache。MQ path 呈現傳統 syscall IPC 的成本；SHM syscall path 用來隔離 queue/ring 結構差異；SHM mmap path 則展示避開每筆 user/kernel copy 後，必須自行承擔同步與 ABI 管理責任。
 
-共享記憶體不是「自動比較快」，而是把資料搬移責任從 kernel 轉到使用者空間。當資料路徑清楚、同步規則正確、layout 一致時，它可以減少每筆訊息的 syscall 與資料複製成本；如果同步或 layout 沒處理好，錯誤也會更難查。
+共享記憶體會把資料搬移責任從 kernel 轉到使用者空間。當資料路徑清楚、同步規則正確、layout 一致時，它可以減少每筆訊息的 syscall 與資料複製成本；如果同步或 layout 沒處理好，錯誤也會更難查。

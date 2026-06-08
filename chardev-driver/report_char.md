@@ -1,6 +1,6 @@
 # Linux 字元裝置驅動技術報告
 
-本報告說明 `chardev-driver` 的設計、執行流程、資料保護方式，以及開發時遇到的問題。內容以目前專案中的程式碼為準，重點是把 driver 的運作方式講清楚，讓第一次接觸 Linux kernel module 的讀者也能順著流程理解。
+本報告說明 `chardev-driver` 的設計、執行流程、資料保護方式，以及開發時遇到的問題。內容以目前專案中的程式碼為準，重點是把 driver 的運作方式說清楚，讓流程能直接對回程式碼。
 
 ---
 
@@ -329,7 +329,7 @@ drv.buf_len 又被另一個行程更新
 - `IOCTL_GET_LEN` 讀取 `drv.buf_len`。
 - `read_only_store()` 與 `IOCTL_SET_RDONLY` 都可更新 `drv.read_only`。
 
-在這份教學 driver 中，這樣設計可讓程式保持簡潔；若要放進更嚴格的產品情境，應該把狀態讀寫也納入一致的同步策略。
+在這份簡化版 driver 中，這樣設計可讓程式保持簡潔；若要放進更嚴格的產品情境，應該把狀態讀寫也納入一致的同步策略。
 
 ---
 
@@ -448,8 +448,8 @@ lseek(fd, 0, SEEK_SET);
 
 分析：
 
-- 這不是 driver 沒有保存資料，而是檔案位置語意造成的結果。
-- 新手常會把 `/dev/chardev0` 想成單純變數，但 VFS 仍會處理 fd 與 position。
+- 這是檔案位置語意造成的結果。
+- `/dev/chardev0` 不是單純變數；VFS 仍會處理 fd 與 position。
 
 ### 8.5 BUG：Shell 顯示 `Permission denied` 容易誤判
 

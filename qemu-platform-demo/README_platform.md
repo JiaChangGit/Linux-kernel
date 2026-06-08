@@ -344,7 +344,7 @@ Ctrl-A，接著按 X
 
 ## DEMO 流程
 
-DEMO 不是只看 QEMU 有沒有開起來，而是確認每一層都有接上。
+DEMO 會確認 QEMU 啟動、driver bind、sysfs 屬性與自測流程是否都接上。
 
 | 階段 | 發生的事 | 成功代表什麼 | 失敗時先看哪裡 |
 |---|---|---|---|
@@ -571,4 +571,3 @@ bash scripts/06_clean.sh --all
 - `devm_* resource management`：`devm_kzalloc()` 與 `devm_ioremap_resource()` 會把資源生命週期綁在 device 上，`probe()` 失敗時比較不容易漏掉清理。
 - `sysfs error propagation`：使用者寫入不合法資料時，例如 `brightness` 超過 255，driver 會回傳錯誤，而不是假裝成功。
 - `Simulated register bank`：目前 QEMU 沒有真正的 myled MMIO device model，所以 driver 用 `sim_regs[]` 模擬暫存器。這讓 platform driver、Device Tree、sysfs 與測試流程可以先跑通。
-

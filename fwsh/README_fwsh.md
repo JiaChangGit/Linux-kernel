@@ -4,7 +4,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Linux-orange.svg)](https://www.linux.org/)
 [![Language](https://img.shields.io/badge/Language-C11-green.svg)](https://en.cppreference.com/w/c/11)
 
-`fwsh` 是一個用 C 實作的 Linux 迷你 Shell。它的重點不是取代 `bash`，而是把 Shell 會用到的作業系統觀念拆開來實作：讀取指令、解析參數、建立子行程、串接管線、處理重導向，以及回收背景行程。
+`fwsh` 是一個用 C 實作的 Linux 迷你 Shell，聚焦在 Shell 會用到的作業系統觀念：讀取指令、解析參數、建立子行程、串接管線、處理重導向，以及回收背景行程。
 
 除了基本 Shell 功能，`fwsh` 也放入幾個偏韌體開發會用到的小工具，例如 `hexdump`、`crc32`、`memmap`。這些工具讓使用者可以直接在自己的 Shell 裡檢查二進位檔案、驗證 CRC-32 檢查碼，或觀察 Linux 的實體記憶體配置。
 
@@ -18,7 +18,7 @@
 2. Linux userspace 程式如何使用 `fork()`、`execvp()`、`pipe()`、`dup2()`、`waitpid()`。
 3. 韌體或底層系統開發常見的二進位檢查流程，例如 Hexdump 和 CRC-32。
 
-本專案目前是互動式 Shell，不是完整 POSIX Shell。也就是說，它支援常見的管線與重導向語法，但尚未實作變數展開、萬用字元展開、腳本語法、完整工作控制等功能。
+本專案目前是互動式 Shell，支援常見的管線與重導向語法；變數展開、萬用字元展開、腳本語法、完整工作控制等功能尚未實作。
 
 ---
 
@@ -318,7 +318,7 @@ make clean
 
 ## DEMO 流程總覽
 
-這一段的目的，是用一套固定操作展示 `fwsh` 的主要功能。DEMO 不是隨便輸入幾個指令，而是依序驗證 Shell 的幾個核心能力：啟動、內建指令、外部指令、管線、重導向、韌體工具、背景執行、歷史紀錄和正常離開。
+這一段用一套固定操作驗證 `fwsh` 的主要功能：啟動、內建指令、外部指令、管線、重導向、韌體工具、背景執行、歷史紀錄和正常離開。
 
 建議 DEMO 前先完成：
 

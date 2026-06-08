@@ -2,7 +2,7 @@
 
 `ssd-fw-sim` 是一個以 C11 撰寫的 SSD 韌體模擬器，聚焦在 **寫入路徑 (Write Path)**：主機送出 `WRITE` 指令後，資料如何經過 NVMe 佇列、韌體內部請求佇列、FTL 位址轉換、NAND 寫入、垃圾回收，最後回報完成。
 
-這個專案不是完整 SSD 產品韌體，而是把 SSD 寫入流程拆成容易觀察的模組。讀程式時可以把它想成「精簡版控制器韌體」。
+本專案聚焦在 SSD 寫入流程，並將路徑拆成容易觀察的模組。讀程式時可以把它視為「精簡版控制器韌體」。
 
 ## 模組總覽
 
@@ -298,7 +298,7 @@ python3 scripts/gen_trace.py --mode mixed --count 100 --max-lba 4096 --max-size 
 | `random` | Random Workload | 每筆 request 隨機選 LBA，容易造成覆寫與 invalid page |
 | `mixed` | Mixed Workload | 混合循序與隨機寫入，較接近一般使用情境 |
 
-新手建議先用 `--count 100` 或 `--count 1000`，避免輸出太大不易觀察。若想更容易看到 GC，可搭配較小的設定檔，例如降低 `total_blocks`。
+建議先用 `--count 100` 或 `--count 1000`，避免輸出太大不易觀察。若想更容易看到 GC，可搭配較小的設定檔，例如降低 `total_blocks`。
 
 ### DEMO 5：完整建置與驗證流程
 
@@ -552,4 +552,3 @@ WA 越高，代表同樣的 host 寫入量造成更多 NAND program，通常會�
 - 模擬 multi-channel / multi-die NAND 平行度。
 - 加入 power-loss checkpoint 與 metadata journal。
 - 補上更完整的 NVMe admin command 與 doorbell 模型。
-

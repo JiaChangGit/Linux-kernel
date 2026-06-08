@@ -2,7 +2,7 @@
 
 本儲存庫收錄六個可獨立建置、獨立執行的系統程式子專案，主題涵蓋 Linux 字元裝置驅動、IPC 效能比較、POSIX Shell、QEMU Platform Driver、CPU 排程演算法模擬，以及 SSD 韌體寫入路徑模擬。
 
-這份 README 的定位是「新手導覽」：先看每個子專案在做什麼、怎麼跑、核心實作在哪裡，再到 [`report.md`](report.md) 讀完整 API 教學、圖解與選型比較。
+這份 README 先整理每個子專案在做什麼、怎麼跑、核心實作在哪裡；更完整的 API、圖解與選型比較放在 [`report.md`](report.md)。
 
 ---
 
@@ -23,7 +23,7 @@ https://youtu.be/477eGS1VDNE
 | QEMU Platform Driver | [`qemu-platform-demo/`](qemu-platform-demo/) | Kernel on ARM64 QEMU | Device Tree、MMIO LED、sysfs 控制 | platform driver、devm、readl/writel |
 | CPU 排程模擬 | [`cpu-scheduling-qemu/`](cpu-scheduling-qemu/) | User space + QEMU 腳本 | FCFS/SJF/SRTF/Priority/RR 與 Gantt chart | OS 排程演算法、指標計算 |
 
-> 注意：`cpu-scheduling-qemu/src/scheduler.c` 是 user-space 排程演算法模擬器，不是 Linux kernel CFS patch。`qemu-platform-demo` 是 Platform Driver demo，目前沒有真實 IRQ handler 或 DMA engine。
+> 注意：`cpu-scheduling-qemu/src/scheduler.c` 是 user-space 排程演算法模擬器。`qemu-platform-demo` 是 Platform Driver demo，目前沒有真實 IRQ handler 或 DMA engine。
 
 ---
 
@@ -102,7 +102,7 @@ sudo apt install -y gcc-aarch64-linux-gnu
 1. 想先跑起來：讀本 README 的各子專案「建置與執行」。
 2. 想理解怎麼實作：讀 [`report.md`](report.md) 的六個子專案章節。
 3. 想查 API 細節：讀各子目錄的 `report_*_api.md`。
-4. 想準備口頭報告或面試：讀 [`report.md`](report.md) 的「API 橫向比較」與「開發挑戰」。
+4. 想快速整理技術重點：讀 [`report.md`](report.md) 的「API 橫向比較」與「開發挑戰」。
 
 ---
 
@@ -525,7 +525,7 @@ bash scripts/05_cleanup.sh
 
 | 文件 | 用途 |
 |------|------|
-| [`report.md`](report.md) | 全專案詳細技術報告、API 教學、比較與圖解 |
+| [`report.md`](report.md) | 全專案詳細技術報告、API 比較與圖解 |
 | [`ssd-fw-sim/report_ssd_api.md`](ssd-fw-sim/report_ssd_api.md) | SSD 模擬器 API 細節 |
 | [`chardev-driver/report_char_api.md`](chardev-driver/report_char_api.md) | 字元驅動 API 細節 |
 | [`linux-ipc-benchmark/report_ipc_api.md`](linux-ipc-benchmark/report_ipc_api.md) | IPC 與 mmap API 細節 |

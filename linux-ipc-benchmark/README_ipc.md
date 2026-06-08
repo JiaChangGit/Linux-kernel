@@ -12,7 +12,7 @@
 
 所以正式 benchmark 是三種測試，不是四種。`copy_from_user()`、`copy_to_user()`、`spinlock` 是第 2 種 **SHM syscall** 的實作細節，不是另一個獨立測試。
 
-專案重點不是直接使用 POSIX message queue 或 System V shared memory，而是自己寫一個最小可跑的核心模組，觀察「資料複製次數」、「系統呼叫成本」和「同步方式」如何影響 IPC 效能。
+專案透過自製的最小核心模組，觀察「資料複製次數」、「系統呼叫成本」和「同步方式」如何影響 IPC 效能。
 
 ---
 
@@ -138,7 +138,7 @@ sudo apt install -y build-essential linux-headers-$(uname -r) kmod gcc make bc
 關鍵字補充：
 
 - **Kernel headers**：kernel module 不是一般程式。它會連到 kernel 內部 API，所以編譯時需要和目前 kernel 版本相符的 headers。
-- **Kbuild**：Linux kernel 官方的建置系統。`kernel/Makefile` 不是直接用 `gcc` 編譯 `.c`，而是把工作交給 `/lib/modules/$(uname -r)/build`。
+- **Kbuild**：Linux kernel 官方的建置系統。`kernel/Makefile` 會把 module build 交給 `/lib/modules/$(uname -r)/build`。
 - **`.ko`**：Kernel Object，編譯完成的 kernel module 檔案。此專案會產生 `mq_module.ko` 與 `shm_module.ko`。
 - **root 權限**：載入 kernel module 會改變 kernel runtime 狀態，所以需要 `sudo`。
 
@@ -240,7 +240,7 @@ demo 的訊息數很少，適合先理解資料怎麼流動：
 sudo bash scripts/02_demo.sh
 ```
 
-demo 的目的不是測極限效能，而是讓你用少量訊息看懂兩種 IPC 路徑怎麼工作。建議先跑 demo，再跑 benchmark。
+demo 使用少量訊息呈現兩種 IPC 路徑的工作方式。建議先跑 demo，再跑 benchmark。
 
 `02_demo.sh` 會分成兩段，並在每段執行前停下來等你按 Enter：
 
@@ -339,7 +339,7 @@ shm_demo
 - 它展示 `mmap()` 只負責建立映射，不是每筆訊息都呼叫 kernel。
 - 它展示 shared memory 的速度來源：少掉每筆 `copy_from_user()` / `copy_to_user()`。
 - 它也展示 shared memory 的責任：使用者程式要自己管理 `head`、`tail`、full/empty 判斷與 memory barrier。
-- 它不是完整 lock-free queue 教學；目前使用 `volatile` 與 `__sync_synchronize()`，只適合這份 benchmark 的單一 producer / 單一 consumer（SPSC）情境。
+- 它目前使用 `volatile` 與 `__sync_synchronize()`，只適合這份 benchmark 的單一 producer / 單一 consumer（SPSC）情境；完整 lock-free queue 需要更嚴謹的 atomic 設計。
 
 `shm_demo` 輸出中的關鍵字：
 

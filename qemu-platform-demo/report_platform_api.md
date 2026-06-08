@@ -36,7 +36,7 @@ DTS overlay
 
 ## 0A. API 關鍵字地圖
 
-讀 Linux driver API 時，最容易卡住的地方不是單一函式，而是不知道這些名詞分別屬於哪一層。下面這張表先把本專案會遇到的關鍵字放在同一張地圖裡。
+讀 Linux driver API 時，先把名詞所屬的層次分清楚。下面這張表把本專案會遇到的關鍵字放在同一張地圖裡。
 
 | 關鍵字 | 英文 / API 名稱 | 所屬層級 | 在本專案中的位置 | 先理解什麼 |
 |---|---|---|---|---|
@@ -221,7 +221,7 @@ flowchart TD
 | `dtc -I dtb -O dts` | 把 DTB 反編譯成 DTS。 | 可掃描 `reg`，做位址重疊檢查。 | 反編譯結果適合檢查，不一定適合當手寫來源長期維護。 | 使用於檢查。 |
 | `dtc -I dts -O dtb -@` | 把 overlay DTS 編成 DTBO，並保留 overlay 需要的符號資訊。 | 可把小片段 overlay 獨立管理。 | DTS 寫錯時會在這步失敗。 | 使用。 |
 | `fdtoverlay` | 把 base DTB 和 DTBO 合併。 | 不必改整份 base DTS。 | overlay target 與格式要正確。 | 使用。 |
-| 直接手改整份 base DTS | 把 QEMU base DTS 反編譯後手動插入 node 再編回 DTB。 | 對初學者直覺。 | 容易把 QEMU 產生的其他內容一起改壞，也不容易重現。 | 不使用。 |
+| 直接手改整份 base DTS | 把 QEMU base DTS 反編譯後手動插入 node 再編回 DTB。 | 直覺。 | 容易把 QEMU 產生的其他內容一起改壞，也不容易重現。 | 不使用。 |
 
 ### 為什麼用 Overlay
 
@@ -359,7 +359,7 @@ module exit:
   platform_driver_unregister(&myled_driver)
 ```
 
-## 5A. Driver Matching API 教學與選擇依據
+## 5A. Driver Matching API 與選擇依據
 
 Platform driver 的配對方式不只一種。這個專案使用 Device Tree 的 `compatible`，但要理解為什麼這樣選，需要把幾種常見配對方式放在一起看。
 
@@ -429,7 +429,7 @@ flowchart TD
 | Fatal error | 缺少 MEM resource、MMIO base/size 不符合預期、sysfs 建立失敗 | 直接回傳錯誤，driver 不完成 bind。 |
 | Non-fatal fallback | `num-leds` 缺失、`default-brightness` 缺失、非 simulated mode ioremap 失敗 | 使用預設值或切換 simulated mode。 |
 
-## 6A. Probe Path API 教學與選擇依據
+## 6A. Probe Path API 與選擇依據
 
 `probe()` 是 driver 最重要的初始化入口。可以把它想成「kernel 已經找到可能相容的 device，現在 driver 要確認資源能不能用，並把自己的狀態建立起來」。
 
@@ -677,7 +677,7 @@ cat status
 cat info
 ```
 
-## 8A. sysfs API 教學與選擇依據
+## 8A. sysfs API 與選擇依據
 
 sysfs 的設計重點是「一個檔案代表一個簡單屬性」。本專案的 `enable`、`brightness`、`color`、`blink`、`status`、`info` 都符合這個模型。
 
@@ -831,7 +831,7 @@ flowchart TD
 - usage count 管理
 - idle policy
 
-## 10A. PM API 教學與選擇依據
+## 10A. PM API 與選擇依據
 
 Power Management 容易混淆，因為 Linux kernel 裡至少有兩種常見層級：system sleep 與 runtime PM。
 
@@ -994,7 +994,7 @@ Direct Observation：
 | `05_run_qemu.sh` | 啟動前檢查 kernel、DTB、initramfs 是否存在。 |
 | `06_clean.sh` | 支援 dry-run，降低誤刪風險。 |
 
-## 13A. 錯誤碼與 Logging API 教學
+## 13A. 錯誤碼與 Logging API
 
 Kernel driver 通常不會用 exception，而是用負的 error code 回報失敗。log 則用 `dev_*()` 系列，因為它會自動帶出 device 名稱，比單純 `pr_info()` 更容易追到是哪個 device 出事。
 
@@ -1009,7 +1009,7 @@ Kernel driver 通常不會用 exception，而是用負的 error code 回報失�
 
 ### `IS_ERR()`、`PTR_ERR()`、`IS_ERR_OR_NULL()` 怎麼看
 
-有些 kernel API 失敗時不是回傳 `NULL`，而是回傳 encoded error pointer。
+有些 kernel API 失敗時會回傳 encoded error pointer。
 
 | API / Macro | 用途 | 適合情境 | 本專案關係 |
 |---|---|---|---|
@@ -1184,7 +1184,7 @@ Register access 使用 `spin_lock_irqsave()` 與 `spin_unlock_irqrestore()`。
 
 目前沒有 IRQ handler、workqueue 或 timer，因此 synchronization 主要面對 sysfs 並行與 PM callback。若未來加入 IRQ 或 background worker，應重新檢查 lock ordering 與是否可能在 atomic context 呼叫會睡眠的 API。
 
-## 16A. 同步 API 教學與選擇依據
+## 16A. 同步 API 與選擇依據
 
 同步機制的選擇要看兩件事：保護的資料是什麼，以及 critical section 內會不會睡眠。這個專案保護的是 register access path，操作很短，內容是讀寫 `sim_regs[]` 或 `readl()` / `writel()`。
 
@@ -1246,9 +1246,9 @@ flowchart TD
 
 `sysfs_create_group()` 不是 `devm_` API。本專案在 `remove()` 中明確呼叫 `sysfs_remove_group()`，避免 module remove 或 device unbind 後 sysfs 檔案仍存在。
 
-## 17A. 資源生命週期 API 教學
+## 17A. 資源生命週期 API
 
-Driver 的資源管理可以分成兩類：device-managed resource 和 manual resource。兩者不是誰比較高級，而是生命週期不同。
+Driver 的資源管理可以分成兩類：device-managed resource 和 manual resource。兩者的差異在於生命週期。
 
 ### 資源清理流程圖
 
@@ -1369,7 +1369,7 @@ myled_ctrl: loading out-of-tree module taints kernel
 
 ## 20. Conservative Risk Analysis
 
-以下不是目前 BUG，而是未來擴充時需要注意的風險。
+以下是未來擴充時需要注意的風險。
 
 | 擴充方向 | 風險 | 建議 |
 |---|---|---|

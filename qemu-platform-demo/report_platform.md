@@ -17,7 +17,7 @@
 
 ### 2. 學習範圍
 
-這個專案不是只看 `.ko` 能不能編譯，而是把 driver 會用到的幾個環節接在一起：
+本專案把 driver 會用到的幾個環節接在一起，不只停在 `.ko` 編譯：
 
 ```text
 kernel build -> DTB patch -> driver build -> initramfs build -> QEMU boot -> sysfs validation
@@ -241,7 +241,7 @@ sequenceDiagram
 
 原因：
 
-Device Tree 的 `reg` 不是註解，而是 kernel 會轉成 resource 的真實硬體描述。兩個 platform device 宣告同一段 MMIO，就等於兩個 driver 都認為自己擁有同一段硬體暫存器。
+Device Tree 的 `reg` 是 kernel 會轉成 resource 的真實硬體描述。兩個 platform device 宣告同一段 MMIO，就等於兩個 driver 都認為自己擁有同一段硬體暫存器。
 
 解法：
 

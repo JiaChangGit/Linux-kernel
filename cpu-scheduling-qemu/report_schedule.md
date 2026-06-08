@@ -1,6 +1,6 @@
 # CPU 排程模擬器技術報告
 
-本報告說明 `cpu-scheduling-qemu` 的設計、排程演算法、實驗結果，以及開發過程中遇到的問題。整個專案的核心是「用可重複的環境觀察 CPU 排程演算法」，不是直接修改 Linux kernel scheduler。
+本報告說明 `cpu-scheduling-qemu` 的設計、排程演算法、實驗結果，以及開發過程中遇到的問題。整個專案的核心是用可重複的環境觀察 CPU 排程演算法。
 
 閱讀順序建議：
 
@@ -38,13 +38,13 @@ CPU Scheduling（CPU 排程）要解決的問題是：當多個行程（Process�
 
 這個專案有兩個容易混淆的邊界，需要先說清楚。
 
-### 2.1 不是修改 Linux kernel scheduler
+### 2.1 User-space 排程模擬器
 
 `src/scheduler.c` 是使用者空間（User Space）的模擬器。它不會呼叫 Linux kernel 的排程 API，也不會替換 CFS（Completely Fair Scheduler）。
 
-QEMU 的用途是提供穩定的 Ubuntu 執行環境，不是拿來觀察 guest kernel 內部排程事件。
+QEMU 的用途是提供穩定的 Ubuntu 執行環境；排程事件由 user-space 模擬器產生，並非 guest kernel 內部事件。
 
-### 2.2 QEMU 是實驗環境，不是排程核心
+### 2.2 QEMU 作為實驗環境
 
 排程演算法都在 `scheduler.c`。QEMU、Cloud-init、SSH、Makefile 是為了讓實驗可以自動建置、重複執行、整理結果。
 
@@ -508,7 +508,7 @@ Round Robin 在 quantum 很小、burst 很長時，可能產生大量 Gantt slot
 
 學到的重點：
 
-固定陣列適合教學與小型 workload，但必須讓容量限制變成明確規格。
+固定陣列適合小型 workload，但必須讓容量限制變成明確規格。
 
 ### Bug 7：終端機裝飾字元在不同環境顯示成亂碼
 

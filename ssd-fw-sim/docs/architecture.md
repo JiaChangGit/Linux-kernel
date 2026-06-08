@@ -1,6 +1,6 @@
 # 架構筆記 (Architecture Notes)
 
-`ssd-fw-sim` 是單執行緒的 SSD write path 模擬器。它不是完整 SSD 產品韌體，而是把主機命令、韌體內部佇列、FTL、NAND、GC 與統計拆成可以逐層追蹤的 C 模組。
+`ssd-fw-sim` 是單執行緒的 SSD write path 模擬器，將主機命令、韌體內部佇列、FTL、NAND、GC 與統計拆成可以逐層追蹤的 C 模組。
 
 ## 模組分工
 
@@ -21,11 +21,11 @@
 | 選項 | 適合情境 | 本專案選擇 |
 | --- | --- | --- |
 | 直接讓 `main.c` 呼叫 FTL | 最小 demo，流程短。 | 沒採用。會看不到 NVMe SQ/CQ 與 queue latency。 |
-| `nvme.c` + `request.c` 分層 | 想觀察 host command 和 firmware request 的差別。 | 採用。新手可清楚看到「提交」不等於「已處理」。 |
+| `nvme.c` + `request.c` 分層 | 想觀察 host command 和 firmware request 的差別。 | 採用。能清楚看到「提交」不等於「已處理」。 |
 | 每個模組直接改 struct 欄位 | 短期寫得快。 | 盡量避免。透過 API 修改狀態，較容易維持一致性。 |
-| 單執行緒模型 | 教學、可重現、方便算 latency。 | 採用。文件要說清楚目前沒有多 queue 或多執行緒。 |
+| 單執行緒模型 | 可重現、方便算 latency。 | 採用。文件要說清楚目前沒有多 queue 或多執行緒。 |
 
-## 新手閱讀順序
+## 建議閱讀順序
 
 1. 先看 `main.c`：trace 怎麼變成 `nvme_submit_write()`。
 2. 再看 `nvme.c`：SQ entry 怎麼變成 `request_t`。

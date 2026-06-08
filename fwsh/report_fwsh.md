@@ -419,7 +419,7 @@ typedef struct {
 1. 實作新的 `static int builtin_xxx(Cmd* cmd)`。
 2. 在 `builtins[]` 加入 `{ "xxx", builtin_xxx, "description" }`。
 
-不用在 `is_builtin()` 或 `exec_builtin()` 裡一直增加 `if/else`。
+這樣就無需在 `is_builtin()` 或 `exec_builtin()` 裡一直增加 `if/else`。
 
 ### 9.1 一般內建指令
 
@@ -593,7 +593,7 @@ while (waitpid(-1, NULL, WNOHANG) > 0);
 
 #### 學到的點
 
-背景執行不是「不管它」，而是不能阻塞主流程，但仍要在適當時間回收 child。
+背景執行會讓主流程保持可用，同時仍在適當時間回收 child。
 
 ---
 
@@ -817,4 +817,4 @@ history
 
 `fwsh` 的核心價值在於把 Shell 背後的系統呼叫流程具體化。使用者輸入一行文字後，程式會經過 `readline()`、`parse_line()`、`execute_pipeline()`，最後走到 built-in C 函式或 `fork()` / `execvp()` 的外部程式流程。
 
-這個專案不是完整 Shell，但已涵蓋理解 Linux 行程、管線、檔案描述符、重導向、訊號處理和二進位資料檢查所需的主要概念。檔案中列出的限制和 BUG 分析，也能作為後續重構與功能擴充的依據。
+本專案聚焦在 Shell 的核心資料流：Linux 行程、管線、檔案描述符、重導向、訊號處理和二進位資料檢查。檔案中列出的限制和 BUG 分析，也能作為後續重構與功能擴充的依據。

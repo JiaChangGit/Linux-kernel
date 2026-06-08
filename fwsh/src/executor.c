@@ -124,8 +124,9 @@ int execute_pipeline(Pipeline* pipeline) {
    *   cmd[i+1] stdin 接 pipes[i][0]。
    */
   int npipes = pipeline->ncmds - 1;
+  // MAX_PIPES 代表「最多 pipe 數」
   int pipes[MAX_PIPES][2];
-  pid_t pids[MAX_PIPES];
+  pid_t pids[MAX_PIPES + 1];
   int nforked = 0;
 
   /* 先建立所有 pipe，後續 child 才能依序接線。 */

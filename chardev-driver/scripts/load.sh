@@ -42,7 +42,7 @@ fi
 echo "[*] Verifying device..."
 ls -la /dev/chardev0 || echo "[!] /dev/chardev0 not created yet"
 
-# 教學環境方便測試用。正式環境應依需求設定 udev rule 或權限政策。
+# 本機測試方便使用。正式環境應依需求設定 udev rule 或權限政策。
 echo "[*] Setting permissions..."
 sudo chmod 666 /dev/chardev0 2>/dev/null || true
 

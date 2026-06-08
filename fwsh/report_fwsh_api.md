@@ -674,7 +674,7 @@ flowchart TD
 
 ---
 
-### 8. 相關 API 教學、比較與選擇依據
+### 8. 相關 API、比較與選擇依據
 
 本節把 `fwsh` 用到的 API 放回同類 API 裡比較。讀 API 時不要只背函式名稱，應該要能回答三個問題：
 
@@ -686,12 +686,12 @@ flowchart TD
 
 | API | 作用 | 優點 | 限制或風險 | `fwsh` 選擇依據 |
 |---|---|---|---|---|
-| `fork()` | 複製目前行程，建立 child process。 | 最彈性。child 可以先改 fd、設定 redirection、接 pipe，再 `execvp()`。 | 初學者容易忘記 parent 和 child 都會從 `fork()` 後繼續執行。 | `fwsh` 需要在 child 執行前調整 stdin/stdout，所以選 `fork()`。 |
-| `vfork()` | 建立 child，但 child 暫時和 parent 共用位址空間，直到 exec 或 exit。 | 某些環境下比 `fork()` 輕量。 | 使用限制多，child 不能隨意改變記憶體或呼叫複雜函式，容易踩到未定義行為。 | 不適合教學版 Shell。`fwsh` 需要清楚、安全的流程。 |
-| `posix_spawn()` | 建立新行程並執行程式，可設定部分 file actions。 | 比 `fork()+exec` 更像高階封裝，在大型程式或受限環境可能較有效率。 | 對初學者較抽象，複雜 pipeline 仍要處理 file actions。 | `fwsh` 主要想展示 Shell 原理，因此保留 `fork()+execvp()`。 |
+| `fork()` | 複製目前行程，建立 child process。 | 最彈性。child 可以先改 fd、設定 redirection、接 pipe，再 `execvp()`。 | parent 和 child 都會從 `fork()` 後繼續執行，控制流要明確分開。 | `fwsh` 需要在 child 執行前調整 stdin/stdout，所以選 `fork()`。 |
+| `vfork()` | 建立 child，但 child 暫時和 parent 共用位址空間，直到 exec 或 exit。 | 某些環境下比 `fork()` 輕量。 | 使用限制多，child 不能隨意改變記憶體或呼叫複雜函式，容易踩到未定義行為。 | 不適合目前的 Shell。`fwsh` 需要清楚、安全的流程。 |
+| `posix_spawn()` | 建立新行程並執行程式，可設定部分 file actions。 | 比 `fork()+exec` 更像高階封裝，在大型程式或受限環境可能較有效率。 | 封裝層較高，複雜 pipeline 仍要處理 file actions。 | `fwsh` 主要保留 parser 與 executor 的完整流程，因此使用 `fork()+execvp()`。 |
 | `system()` | 呼叫 `/bin/sh -c command` 執行一整串字串。 | 最簡單，一行就能跑外部命令。 | 會再交給別的 Shell 解析，安全性和可控性差，也看不到 parser/executor 細節。 | 不使用。`fwsh` 的目的就是自己實作解析和執行流程。 |
 
-教學重點：
+重點：
 
 - `fork()` 回傳值有三種情況：child 看到 `0`，parent 看到 child pid，失敗看到 `< 0`。
 - `fork()` 後 parent 和 child 是兩個不同 process，各自有自己的記憶體空間。
@@ -745,7 +745,7 @@ argv[3] = NULL
 
 關鍵字補充：
 
-- `status`：不是單純的 exit code，而是包了更多狀態位元的整數。
+- `status`：包含 exit code 之外的狀態位元。
 - `WIFEXITED(status)`：判斷 child 是否正常用 `exit()` 或 `_exit()` 結束。
 - `WEXITSTATUS(status)`：在 `WIFEXITED` 為真時，取出真正的 exit code。
 - `WNOHANG`：沒有可回收 child 時立刻回傳，不阻塞目前 process。
@@ -776,7 +776,7 @@ pipes[i][1] = write end
 |---|---|---|---|---|
 | `dup(oldfd)` | 否 | 否 | 複製到目前最小可用 fd。 | 不能保證變成 `STDIN_FILENO` 或 `STDOUT_FILENO`。 |
 | `dup2(oldfd, newfd)` | 是 | 否 | 把檔案或 pipe 接到 stdin/stdout。 | `fwsh` 需要精準把 fd 接到 0 或 1，所以選它。 |
-| `dup3(oldfd, newfd, flags)` | 是 | 是，可用 `O_CLOEXEC` | Linux-specific，更精細控制。 | 專案偏 POSIX 教學，`dup2()` 較通用。 |
+| `dup3(oldfd, newfd, flags)` | 是 | 是，可用 `O_CLOEXEC` | Linux-specific，更精細控制。 | 專案以 POSIX API 為主，`dup2()` 較通用。 |
 | `fcntl(F_DUPFD)` | 可指定最小 fd | 可搭配其他 fcntl 操作 | 需要更細 fd 控制時。 | 對本專案過度複雜。 |
 
 `dup2(fd, STDOUT_FILENO)` 的直覺圖：
@@ -1002,7 +1002,7 @@ flowchart TD
 
 - 程式本身仍以為自己在寫 stdout。
 - Shell 在 exec 前把 stdout 改接到檔案。
-- 這就是 redirection 的本質：不是改程式邏輯，而是改 fd 對應的目標。
+- 這就是 redirection 的本質：改變 fd 對應的目標。
 
 #### 9.4 Single foreground built-in 為何不 fork
 
@@ -1395,7 +1395,7 @@ free_pipeline(&pipeline);
 
 ### 13. 目前未觀察到的能力
 
-以下不是 bug，而是目前版本尚未實作：
+以下是目前版本尚未實作的功能：
 
 | 能力 | 說明 |
 |---|---|

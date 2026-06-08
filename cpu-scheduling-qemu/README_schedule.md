@@ -4,7 +4,7 @@
 [![QEMU](https://img.shields.io/badge/Platform-QEMU%20x86__64-blue.svg)](https://www.qemu.org/)
 [![License](https://img.shields.io/badge/License-GPL--2.0-green.svg)](LICENSE)
 
-這個專案用 C 語言實作 CPU 排程演算法，並用 QEMU 建立一個可以重複執行的 Ubuntu 24.04 虛擬機器環境。目標不是修改 Linux kernel 內部排程器，而是用離散事件模擬（Discrete Event Simulation）的方式，把幾個典型排程策略的差異看清楚。
+這個專案用 C 語言實作 CPU 排程演算法，並用 QEMU 建立一個可以重複執行的 Ubuntu 24.04 虛擬機器環境。核心方法是離散事件模擬（Discrete Event Simulation），用來比較幾個典型排程策略的差異。
 
 目前支援的排程策略：
 

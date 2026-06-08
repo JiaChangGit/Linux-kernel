@@ -19,7 +19,7 @@
 | API | 作用 | 類似方式 | 選擇理由 |
 | --- | --- | --- | --- |
 | `stats_update_request()` | 累加 queue/service/total latency。 | 每個模組各自印 log | 集中統計可避免公式不一致。 |
-| `stats_print()` | 印出人類可讀 summary。 | 只輸出 CSV | 新手直接執行即可看結果。 |
+| `stats_print()` | 印出人類可讀 summary。 | 只輸出 CSV | 直接執行即可看結果。 |
 | `stats_export_csv()` | 輸出 CSV 欄位。 | JSON / binary log | CSV 可直接用試算表或 shell script 比較。 |
 
 ## 解讀注意事項

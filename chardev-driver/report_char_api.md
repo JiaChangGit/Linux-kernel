@@ -24,7 +24,7 @@
 | Userspace Makefile | `userspace/Makefile` | 使用 `gcc -Wall -Wextra -I../driver` 編譯 `test_app.c`。 |
 | Load script | `scripts/load.sh` | 建置 driver、載入 `chardev.ko`、檢查 `/dev/chardev0`、顯示 module info 與 dmesg。 |
 | Unload script | `scripts/unload.sh` | 卸載 module、檢查 `/dev` 與 `/proc` 是否清除、執行 clean。 |
-| Documents | `README_char.md`、`report_char.md` | 操作教學與整體技術報告。 |
+| Documents | `README_char.md`、`report_char.md` | 操作流程與整體技術報告。 |
 
 #### Component Relationship
 
@@ -254,7 +254,7 @@ flowchart TD
 | `module_init(fn)` | Macro | 指定 module 載入入口 | `module_init(chardev_init)` |
 | `module_exit(fn)` | Macro | 指定 module 卸載入口 | `module_exit(chardev_exit)` |
 
-教學重點：
+重點：
 
 - `insmod` 成功載入 `.ko` 時，核心呼叫 `chardev_init()`。
 - `rmmod` 卸載 module 時，核心呼叫 `chardev_exit()`。
@@ -318,7 +318,7 @@ ret = alloc_chrdev_region(&drv.devno, 0, 1, DRIVER_NAME);
 
 | API | 英文 | 特性 | 適合情境 |
 |---|---|---|---|
-| `alloc_chrdev_region()` | Allocate Character Device Region | 由 kernel 動態分配 major | 教學、一般 driver，避免手動衝突 |
+| `alloc_chrdev_region()` | Allocate Character Device Region | 由 kernel 動態分配 major | 一般 driver，避免手動衝突 |
 | `register_chrdev_region()` | Register Fixed Device Region | 使用指定 major/minor | 已有固定 major 的 driver |
 | `register_chrdev()` | Legacy Character Device Register | 較舊式介面，抽象較少彈性 | 舊程式或簡單範例 |
 
@@ -345,7 +345,7 @@ ret = cdev_add(&drv.cdev, drv.devno, 1);
 | 寫法 | 英文 | 優點 | 限制 |
 |---|---|---|---|
 | `cdev_init()` + `cdev_add()` | Explicit cdev Registration | 清楚控制 dev_t、cdev、class、device | 程式碼較長 |
-| `misc_register()` | Misc Device | 快速建立 misc device，自動使用 misc major | 不適合教學 major/minor 與完整 cdev 流程 |
+| `misc_register()` | Misc Device | 快速建立 misc device，自動使用 misc major | 不適合展示 major/minor 與完整 cdev 流程 |
 
 選擇依據：
 
@@ -781,7 +781,7 @@ WSL：
 
 #### 分析重點
 
-這不是 `chardev.c` 寫錯，而是建置環境沒有 kernel build system。除錯時要先分清楚「編譯環境問題」和「程式碼語法問題」。
+這通常是建置環境缺少 kernel build system。除錯時要先分清楚「編譯環境問題」和「程式碼語法問題」。
 
 ---
 
@@ -940,7 +940,7 @@ cat /sys/class/chardev/chardev0/buf_len
 
 #### 分析重點
 
-教學 driver 可以接受較簡潔的同步策略；實務 driver 要根據資料一致性需求決定鎖的範圍。
+簡化版 driver 可以接受較簡潔的同步策略；實務 driver 要根據資料一致性需求決定鎖的範圍。
 
 ---
 

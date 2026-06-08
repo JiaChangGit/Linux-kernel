@@ -1,8 +1,8 @@
 # Linux Kernel & Firmware Engineering Portfolio — 技術報告
 
-本報告將 [`README.md`](README.md) 的快速導覽延伸成完整技術文件，並整合原口頭展示稿中的專案介紹、開發挑戰、問答與術語內容。重點是讓新手能看懂：每個子專案的功能如何實作、關鍵 API 長什麼樣、API 的作用與限制、和相似 API 的差別，以及本專案為什麼採用這些設計。
+本報告將 [`README.md`](README.md) 的快速導覽延伸成完整技術文件，並整合專案介紹、開發挑戰、問答與術語內容。重點是交代每個子專案的功能如何實作、關鍵 API 長什麼樣、API 的作用與限制、和相似 API 的差別，以及本專案為什麼採用這些設計。
 
-本文以目前原始碼為準，不把尚未實作的功能寫成已完成。例如：`cpu-scheduling-qemu` 是 user-space 排程模擬器，不是 Linux kernel scheduler patch；`qemu-platform-demo` 目前是 QEMU Platform Driver/sysfs demo，沒有真實 IRQ handler 或 DMA engine。
+本文以目前原始碼為準，只描述已實作的功能。例如：`cpu-scheduling-qemu` 是 user-space 排程模擬器；`qemu-platform-demo` 目前是 QEMU Platform Driver/sysfs demo，沒有真實 IRQ handler 或 DMA engine。
 
 ---
 
@@ -92,7 +92,7 @@ sequenceDiagram
 
 ### 2.2 核心資料結構
 
-| 結構 | 角色 | 新手理解 |
+| 結構 | 角色 | 輔助說明 |
 |------|------|----------|
 | `nvme_controller_t` | 保存 SQ/CQ、head/tail/count、command id | 像 host 與裝置之間的收件匣/回覆匣 |
 | `request_queue_t` | 裝置內部待處理 request ring | 把 NVMe 命令轉成韌體內部工作 |
@@ -101,13 +101,13 @@ sequenceDiagram
 | `nand_block_t` / `nand_page_t` | NAND 區塊與頁狀態 | 模擬 `FREE/VALID/INVALID` 與 erase count |
 | `free_block_pool_t` | 可寫入 block queue | 寫滿目前 block 時取下一個 free block |
 
-### 2.3 關鍵 API 教學
+### 2.3 關鍵 API 與選型
 
 | API | 格式 | 作用 | 與類似 API 的區別 | 選擇依據 |
 |-----|------|------|-------------------|----------|
 | `int nvme_submit_write(nvme_controller_t *c, uint64_t slba, uint32_t nlb, uint64_t ts)` | 回 `0` 成功，SQ 滿回 `-1` | host 端提交 write command | 不等於實際寫 NAND，只是把命令放入 SQ | 保留 NVMe 階層，讓 SQ 滿時可模擬背壓 |
 | `uint32_t nvme_issue_pending(nvme_controller_t *c, request_queue_t *rq)` | 回實際發行數 | 將 SQ entry 轉成 `request_t` 丟進 RQ | `request_queue_enqueue` 只處理內部 queue；此函式多了 SQ opcode 轉換 | 分離協定層與韌體內部 request |
-| `bool scheduler_run(ftl_context_t *ftl, request_queue_t *rq, nvme_controller_t *c)` | 成功回 true | 從 RQ dispatch 到 FTL，更新 latency，送 CQ | 不是 OS scheduler；是 storage request dispatcher | 集中處理 queue latency、service latency 與 completion |
+| `bool scheduler_run(ftl_context_t *ftl, request_queue_t *rq, nvme_controller_t *c)` | 成功回 true | 從 RQ dispatch 到 FTL，更新 latency，送 CQ | storage request dispatcher | 集中處理 queue latency、service latency 與 completion |
 | `bool ftl_handle_request(ftl_context_t *ftl, const request_t *req)` | 目前只接受 WRITE | request type 分派入口 | `ftl_handle_write` 是 private static path | 預留 READ/TRIM 擴充 |
 | `bool mapping_get_physical_page(table,lpn,&ppa)` | 查詢 LPN 是否已有 PPA | 覆寫前找舊頁、GC 後驗證 mapping | 直接讀 `table[lpn]` 會分散 valid bit 判斷 | 讓 L2P 查詢規則集中 |
 | `void mapping_set_physical_page(table,lpn,ppa)` | 更新 L2P | 讓 LPN 指向新 PPA | 不處理 NAND 狀態，只改 mapping | 保持 FTL metadata 單一責任 |
@@ -191,7 +191,7 @@ proc_remove -> device_destroy -> class_destroy -> cdev_del
 -> unregister_chrdev_region -> kfree
 ```
 
-### 3.3 關鍵 API 教學
+### 3.3 關鍵 API 與選型
 
 | API / 巨集 | 格式 | 作用 | 和類似 API 的差別 | 選擇依據 |
 |------------|------|------|-------------------|----------|
@@ -218,7 +218,7 @@ proc_remove -> device_destroy -> class_destroy -> cdev_del
 
 ### 3.5 重要風險
 
-目前 `chardev_write` 在 mutex 外檢查 `drv.read_only`，而 ioctl/sysfs 修改 `read_only` 也沒有與 buffer lock 完全一致。這是很好的教學點：單一布林值看似簡單，但若它會影響資料寫入行為，最好與被保護的資料使用同一把鎖，避免 race。
+目前 `chardev_write` 在 mutex 外檢查 `drv.read_only`，而 ioctl/sysfs 修改 `read_only` 也沒有與 buffer lock 完全一致。這裡暴露出一個同步風險：單一布林值看似簡單，但若它會影響資料寫入行為，最好與被保護的資料使用同一把鎖，避免 race。
 
 ---
 
@@ -266,7 +266,7 @@ Full : (head + 1) % RING_CAPACITY == tail
 
 這種做法會犧牲一個 slot，但能清楚區分空與滿。`common.h` 用 cacheline padding 讓 `head` 與 `tail` 分開，降低 false sharing。
 
-### 4.3 關鍵 API 教學
+### 4.3 關鍵 API 與選型
 
 | API | 格式 | 作用 | 和類似 API 的差別 | 選擇依據 |
 |-----|------|------|-------------------|----------|
@@ -325,7 +325,7 @@ flowchart TB
     CLEAN --> WAIT["waitpid foreground\nSIGCHLD background"]
 ```
 
-### 5.2 關鍵 API 教學
+### 5.2 關鍵 API 與選型
 
 | API | 格式 | 作用 | 和類似 API 的差別 | 選擇依據 |
 |-----|------|------|-------------------|----------|
@@ -386,7 +386,7 @@ myled_probe
   -> pm_runtime_enable
 ```
 
-### 6.3 關鍵 API 教學
+### 6.3 關鍵 API 與選型
 
 | API | 格式 | 作用 | 和類似 API 的差別 | 選擇依據 |
 |-----|------|------|-------------------|----------|
@@ -452,7 +452,7 @@ flowchart TB
 | Priority | `sched_priority()` | 否 | priority 數字越小越高 | 適合重要工作優先 | 低優先權可能飢餓 |
 | Round Robin | `sched_rr(q)` | 是 | 每個 ready process 跑最多 q | 公平、互動性佳 | quantum 太小切換頻繁，太大退化成 FCFS |
 
-### 7.3 關鍵函式教學
+### 7.3 關鍵函式與選型
 
 | 函式 | 格式與作用 | 跟類似函式的差別 | 選擇依據 |
 |------|------------|-------------------|----------|
@@ -504,7 +504,7 @@ QEMU 腳本主要用來建立可重現環境與自動跑 benchmark。排程核�
 
 ### 8.4 佇列與背壓策略
 
-| 佇列 | 滿時行為 | 空時行為 | 教學重點 |
+| 佇列 | 滿時行為 | 空時行為 | 設計重點 |
 |------|----------|----------|----------|
 | NVMe SQ | `nvme_submit_write` 回 `-1`，上層 drain pipeline | 不 issue | 同步模擬背壓 |
 | Request queue | enqueue false | scheduler 不跑 | 裝置內部 queue |
@@ -527,7 +527,7 @@ QEMU 腳本主要用來建立可重現環境與自動跑 benchmark。排程核�
 
 ## 9. 開發挑戰與除錯重點
 
-本章整合原口頭展示稿的挑戰內容，並改寫成與目前原始碼一致的版本。
+本章整合先前整理的挑戰內容，並改寫成與目前原始碼一致的版本。
 
 ### 9.1 Device Tree match 失敗
 
@@ -560,7 +560,7 @@ find /sys -name '*myled*' 2>/dev/null
 
 `linux-ipc-benchmark/user/common.h` 將 `head` 與 `tail` 分別放在 cacheline-sized 結構中。原因是 producer 常改 `head`，consumer 常改 `tail`；如果兩者在同一個 cache line，多核心下會互相 invalidate，吞吐量下降。
 
-### 9.4 Memory barrier 不是 volatile
+### 9.4 Memory barrier 與 volatile 的差別
 
 `volatile` 只能告訴編譯器不要省略讀寫，不保證 CPU 與其他核心看到的順序。SHM ring 需要的是：
 
@@ -693,7 +693,7 @@ NAND 寫入以 page 為單位，但 erase 以 block 為單位。已寫過的 pag
 
 1. 分清楚資料面、控制面與觀測面。
 2. 尊重 user/kernel 邊界，不能把 user pointer 當一般指標。
-3. 依臨界區特性選同步 API，而不是一律上鎖。
+3. 依臨界區特性選同步 API，讓鎖的範圍和資料一致性需求對齊。
 4. 以狀態機思考 NAND、佇列、排程器與 pipeline。
 5. 讓程式可觀測：`dmesg`、procfs、sysfs、stats、Gantt chart、CSV 都是除錯工具。
 

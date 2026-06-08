@@ -279,7 +279,7 @@ ssd_config_validate(&config);
 ssd_config_print(&config);
 ```
 
-這個順序的重點是：先有預設值，再用檔案覆寫，最後檢查整體是否合理。不要先 validate 再 load，因為 load 後的值才是實際要跑的設定。
+這個順序的重點是：先有預設值，再用檔案覆寫，最後檢查整體是否合理。validate 需要放在 load 後面，因為 load 後的值才是實際要跑的設定。
 
 ## 5. Request Queue API
 

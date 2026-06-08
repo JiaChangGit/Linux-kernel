@@ -67,7 +67,7 @@ flowchart TD
 
 # Conservative Inference
 
-專案的比較軸線不是「Linux 內建 MQ vs Linux 內建 SHM」，而是「同一個專案中自行實作的三條資料路徑」。因此報告中的效能解讀只應對應這份 codebase，不應直接推論所有 IPC API。
+專案的比較軸線是「同一個專案中自行實作的三條資料路徑」。因此報告中的效能解讀只應對應這份 codebase，不應直接推論所有 IPC API。
 
 ### 3. Benchmark 測試項目
 
@@ -83,7 +83,7 @@ flowchart TD
 
 # Conservative Inference
 
-第二項不是另一種 zero-copy shared memory，而是 syscall 對照組。它使用 `spinlock` 和 kernel 端 ring buffer，但每筆訊息仍進 kernel，也仍做 user/kernel copy。
+第二項是 syscall 對照組。它使用 `spinlock` 和 kernel 端 ring buffer，但每筆訊息仍進 kernel，也仍做 user/kernel copy。
 
 ---
 
@@ -254,7 +254,7 @@ Ring state:
 | `cdev_del()` | `mq_exit()`、`shm_exit()` | 移除 cdev。 | 無 | cleanup 必要步驟。 |
 | `unregister_chrdev_region()` | `mq_exit()`、`shm_exit()` | 釋放 major/minor。 | 無 | cleanup 必要步驟。 |
 
-教學重點：
+重點：
 
 ```text
 alloc_chrdev_region()
@@ -288,7 +288,7 @@ alloc_chrdev_region()
 
 | API | 位置 | 功能 | 類似 API | 選擇依據 |
 | --- | --- | --- | --- | --- |
-| `proc_create()` | `mq_init()`、`shm_init()` | 建立 `/proc/mq_stats`、`/proc/shm_stats`。 | `debugfs_create_file()`、`sysfs_create_file()` | 這裡是教學用統計輸出，procfs 直覺、容易 `cat`。 |
+| `proc_create()` | `mq_init()`、`shm_init()` | 建立 `/proc/mq_stats`、`/proc/shm_stats`。 | `debugfs_create_file()`、`sysfs_create_file()` | 這裡是簡單統計輸出，procfs 直覺、容易 `cat`。 |
 | `single_open()` | `mq_proc_open()`、`shm_proc_open()` | 建立一次性 seq_file。 | 手寫 `.read` | 避免手動處理 offset 與 partial read。 |
 | `seq_read()` | `g_proc_ops` | seq_file 標準 read。 | 手寫 read callback | 多行文字輸出較安全。 |
 | `seq_printf()` | stats show function | 輸出 key/value 統計。 | `snprintf` 到 buffer | seq_file 已處理 buffer 管理。 |
@@ -304,7 +304,7 @@ alloc_chrdev_region()
 
 | API | 位置 | 功能 | 類似 API | 選擇依據 |
 | --- | --- | --- | --- | --- |
-| `DEFINE_KFIFO()` | `mq_module.c` global | 建立 static FIFO storage。 | `kfifo_alloc()`、手寫 ring | 固定大小、教學簡潔。 |
+| `DEFINE_KFIFO()` | `mq_module.c` global | 建立 static FIFO storage。 | `kfifo_alloc()`、手寫 ring | 固定大小、程式簡潔。 |
 | `kfifo_in()` | `mq_write()` | 將 bytes 放進 FIFO。 | `kfifo_put()` | 本專案一次放 64 bytes，不是一個 C object。 |
 | `kfifo_out()` | `mq_read()` | 從 FIFO 取出 bytes。 | `kfifo_get()` | 同上，一次取固定 bytes。 |
 | `kfifo_len()` | `mq_read()`、stats | 查已使用 bytes。 | 自行維護 count | 使用 helper 降低錯誤。 |
@@ -337,7 +337,7 @@ alloc_chrdev_region()
 | `kmalloc()` | 小型、需要實體連續或至少容易處理的 kernel buffer | 大 buffer 可能配置失敗；對 mmap 不一定方便。 |
 | `alloc_pages()` | 需要頁面為單位、可控制 order 的配置 | 需要自己管理 page life cycle。 |
 | `dma_alloc_coherent()` | 裝置 DMA coherent buffer | 本專案沒有硬體 DMA，不需要。 |
-| `remap_vmalloc_range()` | 直接把 vmalloc area 映射到 VMA | 可簡化程式；本專案保留手動 PFN loop 以便教學。 |
+| `remap_vmalloc_range()` | 直接把 vmalloc area 映射到 VMA | 可簡化程式；本專案保留手動 PFN loop 以便明確控制每頁映射。 |
 | `vm_insert_page()` | 逐頁插入 `struct page` | 也可做 page-based mapping，但本專案已用 PFN path。 |
 
 ### 7. SHM synchronization API
@@ -350,7 +350,7 @@ alloc_chrdev_region()
 | `__sync_synchronize()` | user mmap worker | user-space full memory barrier。 | C11 `atomic_thread_fence()` | 舊 GCC builtin，簡單但語意較粗。 |
 | `volatile` | shared `head/tail` | 避免編譯器把值快取在暫存器。 | C11 `_Atomic` | `volatile` 不等於完整同步；若要嚴謹應用 atomic。 |
 
-教學提醒：
+注意：
 
 - `volatile` 只能限制編譯器最佳化，不保證跨 CPU 的完整同步語意。
 - 如果要把 mmap ring 做成更正式的 SPSC queue，建議使用 acquire/release atomic。

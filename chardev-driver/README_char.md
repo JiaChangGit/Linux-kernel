@@ -6,7 +6,7 @@
 
 本專案實作一個 Linux 字元裝置驅動程式 (Character Device Driver)。載入核心模組後，系統會建立 `/dev/chardev0`，使用者程式可以用一般檔案 I/O 呼叫 `open()`、`read()`、`write()` 和 `ioctl()` 與核心模組互動。
 
-這份專案的重點不是把字串寫進記憶體而已，而是用一個小型驅動示範 Linux driver 常見的幾個介面：
+這份專案用一個小型驅動串起 Linux driver 常見的幾個介面：
 
 - `/dev/chardev0`：字元裝置節點 (Device Node)，給使用者程式讀寫資料。
 - `/proc/chardev_info`：procfs 診斷介面，查看目前 buffer、計數器和唯讀狀態。
@@ -17,7 +17,7 @@
 
 ## 專案可以學到什麼
 
-| 關鍵字 | 英文 | 在本專案中的位置 | 新手理解 |
+| 關鍵字 | 英文 | 在本專案中的位置 | 說明 |
 |---|---|---|---|
 | 字元裝置 | Character Device | `driver/chardev.c` | 以位元組流方式讀寫的裝置，例如序列埠、終端機、虛擬 driver。 |
 | 虛擬檔案系統 | VFS, Virtual File System | `struct file_operations` | Linux 把 `read()`、`write()` 先交給 VFS，再由 VFS 轉給 driver callback。 |
@@ -202,7 +202,7 @@ Shell 可能顯示：
 bash: /dev/chardev0: Permission denied
 ```
 
-這不是檔案權限一定壞掉，而是 driver 的 `chardev_write()` 回傳 `-EACCES`。先檢查：
+這通常是 driver 的 `chardev_write()` 回傳 `-EACCES`，不一定是檔案權限問題。先檢查：
 
 ```bash
 cat /sys/class/chardev/chardev0/read_only

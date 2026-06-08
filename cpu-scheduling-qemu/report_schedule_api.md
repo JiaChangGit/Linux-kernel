@@ -107,8 +107,8 @@ flowchart TD
 
 | 做法 | 優點 | 缺點 | 本專案選擇 |
 | --- | --- | --- | --- |
-| `strcmp()` if/else | 直覺、初學者容易追流程 | algorithm 變多時會變長 | 目前演算法數量少，適合 |
-| function pointer table | 擴充性好，新增演算法只要加表格列 | 初學者需要理解函式指標 | 可作為後續重構方向 |
+| `strcmp()` if/else | 直覺、流程容易追 | algorithm 變多時會變長 | 目前演算法數量少，適合 |
+| function pointer table | 擴充性好，新增演算法只要加表格列 | 需要理解函式指標 | 可作為後續重構方向 |
 | `switch` + enum | 結構清楚 | 仍要先把字串轉 enum | 對目前規模不是必要 |
 
 ---
@@ -153,7 +153,7 @@ flowchart TD
 | `fgets()` + `sscanf()` | 可以保留整行，錯誤訊息較好做 | 程式碼較長 | 若要支援空行、註解、行號錯誤提示，可改用 |
 | 自訂 parser | 彈性最大 | 成本最高，容易過度設計 | 若 workload 語法變複雜才需要 |
 
-本專案使用 `scanf()`，因為 workload 是教學用固定格式。不過程式仍需要檢查 `n_proc`、`arrival`、`burst`，避免非法輸入造成陣列越界或排程時間不前進。
+本專案使用 `scanf()`，因為 workload 是固定格式。不過程式仍需要檢查 `n_proc`、`arrival`、`burst`，避免非法輸入造成陣列越界或排程時間不前進。
 
 ---
 
@@ -251,7 +251,7 @@ GanttSlot { pid = 2, start = 1, end = 5 }
 
 | 做法 | 優點 | 缺點 | 本專案選擇 |
 | --- | --- | --- | --- |
-| 固定陣列 | 簡單、容易追蹤、不需要 `malloc/free` | 有容量上限 | 適合教學 workload |
+| 固定陣列 | 簡單、容易追蹤、不需要 `malloc/free` | 有容量上限 | 適合小型 workload |
 | `malloc()` 動態配置 | 可依輸入大小配置 | 要處理釋放與錯誤路徑 | 大型 workload 可改用 |
 | linked list | 插入刪除彈性高 | cache locality 差，程式較長 | 不適合目前需求 |
 
@@ -587,7 +587,7 @@ die()
 
 | 做法 | 優點 | 缺點 | 適合情境 |
 | --- | --- | --- | --- |
-| `sshpass` + 密碼 | demo 快速，不需要先產生 key | 不適合正式環境 | 本機教學與短期 VM |
+| `sshpass` + 密碼 | demo 快速，不需要先產生 key | 不適合正式環境 | 本機 demo 與短期 VM |
 | SSH key | 安全、可自動化 | 要管理 key 與 authorized_keys | 長期環境、CI、伺服器 |
 
 本專案使用 `sshpass` 是為了降低本機 demo 的前置設定。正式環境應改用 SSH key。
@@ -945,7 +945,7 @@ struct Algorithm {
 };
 ```
 
-優點是新增演算法時更集中。缺點是初學者要理解 function pointer。
+優點是新增演算法時更集中。缺點是需要理解 function pointer。
 
 ### 17.3 使用動態資料結構
 
@@ -979,4 +979,4 @@ struct Algorithm {
 - Makefile 與 shell scripts 是環境自動化 API。
 - QEMU/Cloud-init 提供可重複的執行環境。
 
-對初學者來說，最重要的是先分清楚兩種輸出：表格與 Gantt Chart 是給人看，`BENCHMARK` 是給程式解析。也要注意 C 程式中的固定陣列、輸入檢查、時間是否前進，這些都是排程模擬器很容易出錯的地方。
+最重要的是先分清楚兩種輸出：表格與 Gantt Chart 是給人看，`BENCHMARK` 是給程式解析。也要注意 C 程式中的固定陣列、輸入檢查、時間是否前進，這些都是排程模擬器很容易出錯的地方。
